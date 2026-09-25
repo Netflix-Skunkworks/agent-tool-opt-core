@@ -11,19 +11,19 @@ Provider-neutral building blocks for improving the tools exposed to AI agents fr
 - composable reward-shaping and generalization methods;
 - train/test separation and paired evaluation utilities;
 - normalized provider usage, estimated cost, and provenance metadata; and
-- optional upstream Metaflow orchestration.
+- an optional dependency on upstream Metaflow; the public orchestration harness is still being migrated.
 
 ## Installation
 
-```bash
-pip install agent-tool-opt-core
-```
-
-Metaflow support is optional:
+The package has not been released to PyPI. Install it from a checkout of this repository:
 
 ```bash
-pip install "agent-tool-opt-core[metaflow]"
+git clone https://github.com/Netflix-Skunkworks/agent-tool-opt-core.git
+cd agent-tool-opt-core
+python -m pip install -e .
 ```
+
+The `metaflow` extra installs upstream Metaflow. The public orchestration harness is still being migrated.
 
 ## LLM configuration
 

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["pdm-backend==2.4.10"]
+build-backend = "pdm.backend"
+
+[project]
+name = "agent-tool-opt-core"
+version = "0.1.0"
+description = "Provider-neutral framework for optimizing agent tool definitions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "addict==2.4.0",
+    "litellm==1.102.1",
+    "loguru==0.7.3",
+    "pydantic==2.13.5",
+    "PyYAML==6.0.3",
+    "toml==0.10.2",
+]
+
+[project.optional-dependencies]
+metaflow = ["metaflow==2.19.36"]
+dev = [
+    "pytest==9.1.0",
+    "pytest-cov==7.1.0",
+    "pytest-mock==3.15.1",
+    "ruff==0.15.17",
+]
+
+[tool.pdm.build]
+package-dir = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

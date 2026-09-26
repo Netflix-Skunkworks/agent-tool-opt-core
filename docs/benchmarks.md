@@ -40,7 +40,9 @@ tar -chf ../opencode-source-linux.tar package.json bun.lock packages node_module
 cd ../agent-tool-opt-core
 ```
 
-Pass that tarball and the absolute path to a Linux Bun executable as `source_bundle` and `bun_linux_binary`. The bundle must contain the root `package.json`, `packages/opencode/src/index.ts`, and `node_modules`. The custom Harbor agent checks these inputs, uploads them to each local-Docker sandbox, overlays the baseline or candidate `.txt` descriptions, then starts OpenCode. It does not run a package manager or download an installer in the sandbox. Configure model credentials through Harbor/OpenCode outside this repository; do not put them in the split manifest or source bundle.
+Pass that tarball and the absolute path to a Linux Bun executable as `source_bundle` and `bun_linux_binary`. The bundle must contain the root `package.json`, `packages/opencode/src/index.ts`, and `node_modules`. The custom Harbor agent checks these inputs, uploads them to each local-Docker sandbox, overlays the baseline or candidate tool files, then starts OpenCode. It does not run a package manager or download an installer in the sandbox. Configure model credentials through Harbor/OpenCode outside this repository; do not put them in the split manifest or source bundle.
+
+Both tool targets default to description-only optimization. To port the original adapters' full-code scope, construct either target with `descriptions_only=False`; TauBench then allows implementation edits while preserving `@is_tool` names, decorators, and signatures, and OpenCode exposes active `.ts` modules alongside `.txt` descriptions. The TypeScript gate requires Bun on the host and parse-checks changed modules. Full-code candidates execute generated code: use a disposable, isolated environment and scoped model credentials, especially for TauBench's in-process class swap.
 
 The adapters implement the core `Benchmark`, `Agent`, and `ToolTarget` interfaces. For example:
 

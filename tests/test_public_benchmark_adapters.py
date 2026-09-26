@@ -13,11 +13,13 @@ import pytest
 from agent_tool_opt_core.adapters.tau2 import (
     Tau2Agent,
     Tau2Benchmark,
+    Tau2CodeValidator,
     Tau2DescriptionValidator,
     Tau2ToolTarget,
 )
 from agent_tool_opt_core.adapters.terminal import (
     OpenCodeAgent,
+    OpenCodeCodeValidator,
     OpenCodeToolTarget,
     OpenThoughtsTBLite,
     TerminalBench2,
@@ -54,6 +56,15 @@ def test_tau2_validator_rejects_code_and_signature_changes():
     ).ok
 
 
+def test_tau2_code_mode_preserves_tool_contract_but_allows_body_edit():
+    validator = Tau2CodeValidator("py", ("tools.py",), _TOOLS, "AirlineTools")
+    body_edit = _TOOLS.replace("return reservation_id", "return reservation_id.upper()")
+    assert validator.validate(Candidate({"tools.py": body_edit})).ok
+    assert not validator.validate(
+        Candidate({"tools.py": body_edit.replace("reservation_id: str", "id: str")})
+    ).ok
+
+
 def test_tau2_tool_target_swaps_and_restores_class(monkeypatch, tmp_path):
     source_file = tmp_path / "tools.py"
     source_file.write_text(_TOOLS)
@@ -74,6 +85,20 @@ def test_tau2_tool_target_swaps_and_restores_class(monkeypatch, tmp_path):
     target.restore()
     assert environment.AirlineTools is original
     assert target.effective_toolset() == target.extract()
+
+    code_target = Tau2ToolTarget("airline", descriptions_only=False)
+    code_target.apply(
+        Candidate(
+            {
+                "tools.py": _TOOLS.replace(
+                    "return reservation_id", "return reservation_id.upper()"
+                )
+            }
+        )
+    )
+    assert environment.AirlineTools().lookup("abc") == "ABC"
+    code_target.restore()
+    assert environment.AirlineTools is original
 
 
 def test_tau2_runner_preserves_transcript_reward_and_cost(monkeypatch):
@@ -113,8 +138,11 @@ def _opencode_checkout(tmp_path: Path) -> Path:
     tool_dir = root / "packages" / "opencode" / "src" / "tool"
     (tool_dir / "shell").mkdir(parents=True)
     (root / "package.json").write_text("{}")
-    (tool_dir / "read.ts").write_text('import DESCRIPTION from "./read.txt"')
+    (tool_dir / "read.ts").write_text(
+        'import DESCRIPTION from "./read.txt"\nexport const ReadTool = Tool.define("read", {})'
+    )
     (tool_dir / "read.txt").write_text("Read a file.")
+    (tool_dir / "registry.ts").write_text('import { ReadTool } from "./read"')
     (tool_dir / "shell" / "prompt.ts").write_text(
         'import DESCRIPTION from "./shell.txt"'
     )
@@ -131,6 +159,33 @@ def test_opencode_target_discovers_nested_imported_descriptions(tmp_path):
     assert target.effective_toolset().files["shell/shell.txt"] == "Run a shell command."
     with pytest.raises(ValueError):
         target.apply(Candidate({"read.ts": "bad"}))
+
+
+def test_opencode_code_mode_exposes_active_ts_and_checks_bun(monkeypatch, tmp_path):
+    target = OpenCodeToolTarget(_opencode_checkout(tmp_path), descriptions_only=False)
+    assert "read.ts" in target.extract().allowlist
+    assert "registry.ts" not in target.extract().allowlist
+    source = target.extract().files["read.ts"]
+    candidate = Candidate({"read.ts": source.replace('"read"', '"lookup"')})
+    monkeypatch.setattr(
+        "agent_tool_opt_core.adapters.terminal.shutil.which", lambda _: None
+    )
+    assert not target.validator().validate(candidate).ok
+
+    calls = []
+    monkeypatch.setattr(
+        "agent_tool_opt_core.adapters.terminal.shutil.which", lambda _: "/bin/bun"
+    )
+    monkeypatch.setattr(
+        "agent_tool_opt_core.adapters.terminal.subprocess.run",
+        lambda args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0),
+    )
+    assert isinstance(target.validator(), OpenCodeCodeValidator)
+    target.apply(candidate)
+    assert "lookup" in target.effective_toolset().files["read.ts"]
+    assert calls[0][:2] == ["/bin/bun", "build"]
+    target.restore()
+    assert target.effective_toolset() == target.extract()
 
 
 def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tmp_path):

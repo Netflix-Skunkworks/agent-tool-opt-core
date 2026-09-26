@@ -2,7 +2,7 @@
 
 This module is imported only by Harbor jobs. The bundle and Linux Bun binary
 are explicit local inputs; no package manager or remote installation script is
-run inside the benchmark sandbox. An overlay is uploaded before OpenCode starts.
+run inside the benchmark sandbox. Tool files are overlaid before OpenCode starts.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ class SourceOpenCodeOptions(OpenCodeOptions):
 
 
 class SourceOpenCode(OpenCode):
-    """OpenCode from source, with a per-evaluation description overlay."""
+    """OpenCode from source, with a per-evaluation tool-file overlay."""
 
     options_model = SourceOpenCodeOptions
 
@@ -115,7 +115,9 @@ class SourceOpenCode(OpenCode):
         )
         if result.return_code != 0:
             raise RuntimeError("failed to extract OpenCode source bundle")
-        for path in sorted(self._overlay.rglob("*.txt")):
+        for path in sorted(self._overlay.rglob("*")):
+            if path.suffix not in {".txt", ".ts"}:
+                continue
             if path.is_symlink() or not path.resolve().is_relative_to(self._overlay):
                 raise ValueError("unsafe overlay file")
             relative = path.relative_to(self._overlay).as_posix()

@@ -1,15 +1,17 @@
 """TerminalBench 2 and TBLite through Harbor and source-run OpenCode.
 
-The tool target exposes only OpenCode's companion ``.txt`` descriptions. The
-benchmark starts a fresh Harbor job for every evaluation; a custom Harbor agent
-uploads a user-built OpenCode source bundle and overlays these descriptions in
-the sandbox before the agent starts. Upstream repositories are never modified.
+The target exposes OpenCode's companion ``.txt`` descriptions by default and
+the active ``.ts`` tool modules in opt-in full-code mode. The benchmark starts
+a fresh Harbor job for every evaluation; a custom Harbor agent uploads a
+user-built OpenCode source bundle and overlays candidate files in the sandbox
+before the agent starts. Upstream repositories are never modified.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -28,10 +30,15 @@ from agent_tool_opt_core.api import (
     Validator,
 )
 
-_RULES = (
+_DESCRIPTION_RULES = (
     "Edit only the companion .txt tool descriptions. Preserve each tool's "
     "purpose, argument constraints, and safety guidance. The .ts implementations "
     "are read-only context; do not propose code changes."
+)
+_CODE_RULES = (
+    "Edit the active OpenCode tool .ts modules and their companion .txt "
+    "descriptions. Preserve Tool.define IDs, exported tool names, parameter "
+    "contracts, and execute return shapes. Keep every module buildable."
 )
 _AGENT_IMPORT = "agent_tool_opt_core.adapters.harbor_opencode:SourceOpenCode"
 
@@ -51,16 +58,59 @@ class OpenCodeDescriptionValidator(Validator):
         return ValidationResult(True, "description edit")
 
 
-class OpenCodeToolTarget(ToolTarget):
-    kind = "txt"
-    language_rules = _RULES
+@dataclass(frozen=True)
+class OpenCodeCodeValidator(Validator):
+    def validate(self, candidate: Candidate) -> ValidationResult:
+        base = super().validate(candidate)
+        if not base.ok:
+            return base
+        code = {
+            name: value
+            for name, value in candidate.files.items()
+            if name.endswith(".ts")
+        }
+        if not code:
+            return ValidationResult(True, "no TypeScript change")
+        bun = shutil.which("bun")
+        if bun is None:
+            return ValidationResult(
+                False, "Bun is required to validate TypeScript edits"
+            )
+        with tempfile.TemporaryDirectory(prefix="ato-bun-check-") as directory:
+            for name, content in code.items():
+                path = Path(directory) / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+                try:
+                    result = subprocess.run(
+                        [bun, "build", "--no-bundle", "--target=node", str(path)],
+                        cwd=directory,
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    return ValidationResult(False, f"Bun validation timed out: {name}")
+                if result.returncode != 0:
+                    return ValidationResult(False, f"Bun could not parse {name}")
+        return ValidationResult(True, "TypeScript parsed")
 
-    def __init__(self, opencode_checkout: Path) -> None:
+
+class OpenCodeToolTarget(ToolTarget):
+    kind = "ts"
+    language_rules = _DESCRIPTION_RULES
+
+    def __init__(
+        self, opencode_checkout: Path, *, descriptions_only: bool = True
+    ) -> None:
         root = Path(opencode_checkout).expanduser().resolve(strict=True)
         tool_dir = root / "packages" / "opencode" / "src" / "tool"
         if not tool_dir.is_dir() or not (root / "package.json").is_file():
             raise ValueError("not an OpenCode source checkout")
         self.tool_dir = tool_dir
+        self.descriptions_only = descriptions_only
+        self.language_rules = _DESCRIPTION_RULES if descriptions_only else _CODE_RULES
         sources = sorted(tool_dir.rglob("*.ts"))
         imported: set[str] = set()
         for source in sources:
@@ -69,32 +119,58 @@ class OpenCodeToolTarget(ToolTarget):
                 target = (source.parent / rel).resolve()
                 if target.is_relative_to(tool_dir) and target.is_file():
                     imported.add(target.relative_to(tool_dir).as_posix())
-        self._baseline = {
+        descriptions = {
             name: (tool_dir / name).read_text(encoding="utf-8")
             for name in sorted(imported)
         }
-        if not self._baseline:
+        if not descriptions:
             raise ValueError("OpenCode checkout has no companion tool descriptions")
+        active_code: dict[str, str] = {}
+        registry = tool_dir / "registry.ts"
+        if not descriptions_only:
+            if not registry.is_file():
+                raise ValueError("OpenCode checkout has no tool registry")
+            for name in re.findall(
+                r"""from\s+["']\./([a-zA-Z0-9_-]+)["']""",
+                registry.read_text(encoding="utf-8"),
+            ):
+                source = tool_dir / f"{name}.ts"
+                if source.is_file():
+                    content = source.read_text(encoding="utf-8")
+                    if "Tool.define" in content:
+                        active_code[source.name] = content
+            if not active_code:
+                raise ValueError("OpenCode checkout has no active tool modules")
+        self._baseline = {**descriptions, **active_code}
         self._context = {
             f"source/{source.relative_to(tool_dir).as_posix()}": source.read_text(
                 encoding="utf-8"
             )
             for source in sources
+            if source.name not in active_code
         }
         self._live = dict(self._baseline)
 
     def extract(self) -> ToolSet:
         return ToolSet(
-            dict(self._baseline), tuple(self._baseline), _RULES, dict(self._context)
+            dict(self._baseline),
+            tuple(self._baseline),
+            self.language_rules,
+            dict(self._context),
         )
 
     def effective_toolset(self) -> ToolSet:
         return ToolSet(
-            dict(self._live), tuple(self._baseline), _RULES, dict(self._context)
+            dict(self._live),
+            tuple(self._baseline),
+            self.language_rules,
+            dict(self._context),
         )
 
     def validator(self) -> Validator:
-        return OpenCodeDescriptionValidator(self.kind, tuple(self._baseline))
+        if self.descriptions_only:
+            return OpenCodeDescriptionValidator(self.kind, tuple(self._baseline))
+        return OpenCodeCodeValidator(self.kind, tuple(self._baseline))
 
     def apply(self, candidate: Candidate) -> None:
         result = self.validator().validate(candidate)
@@ -234,7 +310,7 @@ class HarborBenchmark(Benchmark):
                     name not in tools.allowlist
                     or rel.is_absolute()
                     or ".." in rel.parts
-                    or not name.endswith(".txt")
+                    or not name.endswith((".txt", ".ts"))
                 ):
                     raise ValueError("unsafe tool overlay path")
                 destination = overlay / name

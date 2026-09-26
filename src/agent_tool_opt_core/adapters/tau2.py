@@ -1,9 +1,10 @@
 """TauBench Verified adapter; upstream ``tau2`` is installed separately.
 
-Only @is_tool method docstrings may change. Candidate code is checked against
-the baseline AST before it is executed, and the upstream checkout is never
-written to disk. Runs sharing a process must be sequential: tau2's environment
-module holds the active tools class globally.
+Description-only mode checks candidate source against the baseline AST before
+execution. The opt-in full-code mode preserves the @is_tool contracts but can
+change implementations. The upstream checkout is never written to disk. Runs
+sharing a process must be sequential: tau2's environment module holds the
+active tools class globally.
 """
 
 from __future__ import annotations
@@ -33,11 +34,56 @@ _DOMAINS = {
     "retail": "RetailTools",
     "telecom": "TelecomTools",
 }
-_RULES = (
+_DESCRIPTION_RULES = (
     "Edit only docstrings on @is_tool methods in tools.py. Keep imports, "
     "classes, method signatures, decorators, and executable code unchanged. "
     "Preserve the meaning and required arguments of every tool."
 )
+_CODE_RULES = (
+    "Edit tools.py while preserving the tools class, every @is_tool method name, "
+    "decorator, signature, and return annotation. Keep the module importable."
+)
+
+
+def _is_tool(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for dec in node.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if (
+            getattr(target, "id", None) == "is_tool"
+            or getattr(target, "attr", None) == "is_tool"
+        ):
+            return True
+    return False
+
+
+def _tool_contracts(source: str, class_name: str) -> dict[str, str]:
+    tree = ast.parse(source)
+    classes = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    ]
+    if len(classes) != 1:
+        raise ValueError(f"expected exactly one {class_name} class")
+    contracts = {}
+    for node in classes[0].body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_tool(node):
+            if node.name in contracts:
+                raise ValueError(f"duplicate @is_tool method: {node.name}")
+            contracts[node.name] = ast.dump(
+                ast.Tuple(
+                    elts=[
+                        node.args,
+                        node.returns or ast.Constant(None),
+                        ast.List(elts=node.decorator_list, ctx=ast.Load()),
+                    ],
+                    ctx=ast.Load(),
+                ),
+                include_attributes=False,
+            )
+    if not contracts:
+        raise ValueError("tools class has no @is_tool methods")
+    return contracts
 
 
 def _without_tool_docstrings(source: str) -> str:
@@ -45,22 +91,7 @@ def _without_tool_docstrings(source: str) -> str:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        decorated = any(
-            (
-                getattr(dec.func, "id", None)
-                if isinstance(dec, ast.Call)
-                else getattr(dec, "id", None)
-            )
-            == "is_tool"
-            or (
-                getattr(dec.func, "attr", None)
-                if isinstance(dec, ast.Call)
-                else getattr(dec, "attr", None)
-            )
-            == "is_tool"
-            for dec in node.decorator_list
-        )
-        if decorated and node.body and isinstance(node.body[0], ast.Expr):
+        if _is_tool(node) and node.body and isinstance(node.body[0], ast.Expr):
             value = node.body[0].value
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 value.value = ""
@@ -89,14 +120,41 @@ class Tau2DescriptionValidator(Validator):
         return ValidationResult(True, "docstrings-only edit")
 
 
+@dataclass(frozen=True)
+class Tau2CodeValidator(Validator):
+    baseline_source: str = ""
+    class_name: str = ""
+
+    def validate(self, candidate: Candidate) -> ValidationResult:
+        basic = super().validate(candidate)
+        if not basic.ok:
+            return basic
+        source = candidate.files.get("tools.py")
+        if source is None:
+            return ValidationResult(True, "no change")
+        try:
+            if _tool_contracts(source, self.class_name) != _tool_contracts(
+                self.baseline_source, self.class_name
+            ):
+                return ValidationResult(False, "@is_tool contracts changed")
+            compile(source, "tools.py", "exec")
+        except (SyntaxError, ValueError) as exc:
+            return ValidationResult(False, f"invalid Python source: {exc}")
+        return ValidationResult(True, "tool contracts preserved")
+
+
 class Tau2ToolTarget(ToolTarget):
     kind = "py"
-    language_rules = _RULES
+    language_rules = _DESCRIPTION_RULES
 
-    def __init__(self, domain: str = "airline") -> None:
+    def __init__(
+        self, domain: str = "airline", *, descriptions_only: bool = True
+    ) -> None:
         if domain not in _DOMAINS:
             raise ValueError(f"unsupported tau2 domain: {domain}")
         self.domain = domain
+        self.descriptions_only = descriptions_only
+        self.language_rules = _DESCRIPTION_RULES if descriptions_only else _CODE_RULES
         self._class_name = _DOMAINS[domain]
         self._module_name = f"tau2.domains.{domain}.tools"
         self._environment = importlib.import_module(
@@ -117,7 +175,11 @@ class Tau2ToolTarget(ToolTarget):
         )
 
     def validator(self) -> Validator:
-        return Tau2DescriptionValidator(self.kind, ("tools.py",), self._source)
+        if self.descriptions_only:
+            return Tau2DescriptionValidator(self.kind, ("tools.py",), self._source)
+        return Tau2CodeValidator(
+            self.kind, ("tools.py",), self._source, self._class_name
+        )
 
     def apply(self, candidate: Candidate) -> None:
         result = self.validator().validate(candidate)

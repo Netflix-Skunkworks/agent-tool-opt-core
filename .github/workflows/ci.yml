@@ -27,3 +27,17 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest
+
+  metaflow-local-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[metaflow]"
+      - run: python harness/run_harness_metaflow.py show
+      - run: python harness/run_harness_metaflow.py run --benchmark synthetic --output-dir "$RUNNER_TEMP/ato-metaflow-smoke"
+      - run: python -c 'import json, os; from pathlib import Path; root=Path(os.environ["RUNNER_TEMP"])/"ato-metaflow-smoke"; d=json.loads((root/"summary.json").read_text()); assert d["optimization"]["status"] == "candidate_applied"; assert d["comparison"]["test"]["avg_reward_delta"] == 1.0; assert all((root/f"{phase}.json").is_file() for phase in ("baseline_train", "baseline_test", "optimized_train", "optimized_test"))'
+      - run: python -c 'from metaflow import Flow; r=Flow("ToolOptimizationHarness").latest_successful_run; assert r is not None and r.data.summary["optimization"]["status"] == "candidate_applied"'

@@ -18,4 +18,4 @@ pytest
 
 Do not commit credentials, private prompts, production traces, personal data, provider headers, or internal infrastructure identifiers. Use synthetic fixtures in tests.
 
-By contributing, you agree that your contribution may be distributed under the repository's approved license once that license is finalized.
+By contributing, you agree that your contribution may be distributed under the repository's Apache-2.0 license.

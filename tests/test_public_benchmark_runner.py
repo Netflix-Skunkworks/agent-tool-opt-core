@@ -273,6 +273,216 @@ def test_baseline_failure_has_no_optimized_result(tmp_path):
     assert not (output / "optimized_test.json").exists()
 
 
+def test_baseline_only_can_be_reused_without_new_baseline_calls(tmp_path):
+    benchmark = ExampleBenchmark()
+    agent = ExampleAgent()
+    target = ExampleTarget()
+    baseline_dir = tmp_path / "baseline"
+    baseline = run_five_phases(
+        benchmark,
+        agent,
+        target,
+        None,
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=baseline_dir,
+    )
+    assert baseline["optimization"]["status"] == "baseline_only"
+    assert len(benchmark.calls) == 2
+    assert (baseline_dir / "report.html").is_file()
+
+    output = tmp_path / "optimized"
+    reused = run_five_phases(
+        benchmark,
+        agent,
+        target,
+        ExampleOptimizer(output),
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=output,
+        baseline_dir=baseline_dir,
+    )
+    assert reused["baseline_source"] == str(baseline_dir.resolve())
+    assert benchmark.calls[2:] == [
+        (("train-1",), "edited"),
+        (("test-1",), "edited"),
+    ]
+    assert reused["comparison"]["test"]["avg_reward_delta"] == 1.0
+
+
+def test_baseline_reuse_rejects_changed_tool_snapshot(tmp_path):
+    benchmark = ExampleBenchmark()
+    baseline_dir = tmp_path / "baseline"
+    run_five_phases(
+        benchmark,
+        ExampleAgent(),
+        ExampleTarget(),
+        None,
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=baseline_dir,
+    )
+    changed_target = ExampleTarget()
+    changed_target.baseline = ToolSet(
+        {"tool.txt": "different source"}, ("tool.txt",), changed_target.language_rules
+    )
+    changed_target.live = changed_target.baseline
+    output = tmp_path / "invalid-reuse"
+    with pytest.raises(ValueError, match="incompatible"):
+        run_five_phases(
+            benchmark,
+            ExampleAgent(),
+            changed_target,
+            ExampleOptimizer(output),
+            train=["train-1"],
+            test=["test-1"],
+            output_dir=output,
+            baseline_dir=baseline_dir,
+        )
+    assert not output.exists()
+
+
+def test_baseline_reuse_rejects_incomplete_artifact(tmp_path):
+    baseline_dir = tmp_path / "baseline"
+    benchmark = ExampleBenchmark()
+    run_five_phases(
+        benchmark,
+        ExampleAgent(),
+        ExampleTarget(),
+        None,
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=baseline_dir,
+    )
+    artifact_path = baseline_dir / "baseline_train.json"
+    artifact = json.loads(artifact_path.read_text())
+    artifact["runs"] = []
+    artifact_path.write_text(json.dumps(artifact))
+    output = tmp_path / "reused"
+    with pytest.raises(ValueError, match="incomplete"):
+        run_five_phases(
+            benchmark,
+            ExampleAgent(),
+            ExampleTarget(),
+            ExampleOptimizer(output),
+            train=["train-1"],
+            test=["test-1"],
+            output_dir=output,
+            baseline_dir=baseline_dir,
+        )
+    assert not output.exists()
+
+
+def test_multiple_candidates_each_get_independent_train_test_results(tmp_path):
+    class SequenceOptimizer(ExampleOptimizer):
+        def __init__(self, output_dir):
+            super().__init__(output_dir)
+            self.n = 0
+
+        def propose(self, tools, run, validate, scratch, train_eval=None):
+            assert run.split == "train"
+            assert not (self.output_dir / "baseline_test.json").exists()
+            text = "edited" if self.n == 0 else "different edit"
+            self.n += 1
+            return Candidate({"tool.txt": text})
+
+    output = tmp_path / "output"
+    optimizer = SequenceOptimizer(output)
+    benchmark = ExampleBenchmark()
+    result = run_five_phases(
+        benchmark,
+        ExampleAgent(),
+        ExampleTarget(),
+        optimizer,
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=output,
+        num_candidates=2,
+    )
+    assert optimizer.n == 2
+    assert result["optimization"]["completed"] == 2
+    assert len(result["candidates"]) == 2
+    assert result["candidates"][0]["comparison"]["test"]["avg_reward_delta"] == 1.0
+    assert result["candidates"][1]["comparison"]["test"]["avg_reward_delta"] == 0.0
+    assert (output / "candidate_00" / "optimized_test.json").is_file()
+    assert (output / "candidate_01" / "optimized_test.json").is_file()
+    assert (output / "candidate_00" / "candidate" / "tool.txt").read_text() == "edited"
+    assert "candidate 0" in (output / "report.html").read_text()
+    assert "Optimizer LLM USD" in (output / "report.html").read_text()
+
+
+def test_multiple_no_edit_candidates_have_no_efficacy_result(tmp_path):
+    output = tmp_path / "output"
+    optimizer = ExampleOptimizer(output, Candidate({"tool.txt": "baseline"}))
+    result = run_five_phases(
+        ExampleBenchmark(),
+        ExampleAgent(),
+        ExampleTarget(),
+        optimizer,
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=output,
+        num_candidates=2,
+    )
+    assert result["optimization"] == {
+        "status": "no_valid_candidate",
+        "requested": 2,
+        "completed": 0,
+    }
+    assert not (output / "candidate_00" / "optimized_test.json").exists()
+    assert not (output / "candidate_01" / "optimized_test.json").exists()
+
+
+def test_parallel_phases_use_immutable_toolsets(tmp_path):
+    from threading import Barrier
+
+    class ParallelBenchmark(ExampleBenchmark):
+        parallel_safe = True
+        n_concurrent = 2
+
+        def __init__(self):
+            super().__init__()
+            self.barrier = Barrier(2)
+
+        def evaluate_parallel(self, agent, tasks, tools):
+            self.barrier.wait(timeout=2)
+            return super().evaluate(agent, tasks, tools)
+
+    benchmark = ParallelBenchmark()
+    target = ExampleTarget()
+    result = run_five_phases(
+        benchmark,
+        ExampleAgent(),
+        target,
+        ExampleOptimizer(tmp_path / "output"),
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=tmp_path / "output",
+        parallel_phases=True,
+    )
+    assert result["comparison"]["test"]["avg_reward_delta"] == 1.0
+    assert target.effective_toolset() == target.extract()
+    assert len(benchmark.calls) == 4
+
+
+def test_html_report_escapes_external_names(tmp_path):
+    benchmark = ExampleBenchmark()
+    benchmark.name = "<script>alert(1)</script>"
+    output = tmp_path / "output"
+    run_five_phases(
+        benchmark,
+        ExampleAgent(),
+        ExampleTarget(),
+        None,
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=output,
+    )
+    page = (output / "report.html").read_text()
+    assert "<script>" not in page
+    assert "&lt;script&gt;" in page
+
+
 @pytest.mark.parametrize("entrypoint", [tau2_main, terminal_main])
 def test_public_runner_has_help_without_upstream_runtime(entrypoint, capsys):
     with pytest.raises(SystemExit) as exit_info:

@@ -37,7 +37,36 @@ git clone https://github.com/anomalyco/opencode.git ../opencode
 git clone https://github.com/laude-institute/harbor.git ../harbor
 ```
 
-The TauBench adapter imports the local `tau2` package. The TerminalBench 2 and TBLite adapters run tasks from their local checkouts through Harbor, with OpenCode source and edited tool files uploaded into each sandbox. Both targets support description-only edits by default and opt-in full-code edits. The public runners preserve the five-phase baseline-train/test → optimize → optimized-train/test setup. See [benchmark setup](docs/benchmarks.md) for installation, frozen task splits, and runnable commands. Terminal runs require a Linux OpenCode dependency bundle and Linux Bun executable; these are not shipped here. Live benchmark runs have not yet been verified in this public migration.
+The TauBench adapter imports the local `tau2` package. The TerminalBench 2 and TBLite adapters run tasks from their local checkouts through Harbor, with OpenCode source and edited tool files uploaded into each sandbox. Both targets support description-only edits by default and opt-in full-code edits. The public runners preserve the five-phase baseline-train/test → optimize → optimized-train/test setup, with baseline reuse, multiple candidates, bounded parallel terminal phases, and an HTML summary. See [benchmark setup](docs/benchmarks.md) for installation, frozen task splits, and runnable commands. Terminal runs require a Linux OpenCode dependency bundle and Linux Bun executable; these are not shipped here. Live benchmark runs have not yet been verified in this public migration.
+
+## Run the benchmark adapters
+
+First install the cloned TauBench and Harbor packages (Harbor requires Python 3.12+), create JSON files with disjoint `train` and `test` task IDs, and configure credentials for your chosen models:
+
+```bash
+python -m pip install -e ../tau2-bench-verified
+python -m pip install -e ../harbor
+```
+
+The terminal adapter also needs the Linux OpenCode source bundle described in [benchmark setup](docs/benchmarks.md). Replace the model names and paths below with your own:
+
+```bash
+python -m agent_tool_opt_core.adapters.run_tau2 \
+  --domain airline --split splits/airline.json \
+  --agent-model provider/agent-model --user-model provider/user-model \
+  --optimizer pi --optimizer-model provider/optimizer-model \
+  --methods reward_shaping,generalization --out runs/airline-001
+
+python -m agent_tool_opt_core.adapters.run_terminal \
+  --benchmark tb2 --benchmark-checkout ../terminal-bench-2 \
+  --opencode-checkout ../opencode --split splits/tb2.json \
+  --source-bundle ../opencode-source-linux.tar \
+  --bun-linux-binary /absolute/path/to/linux/bun --jobs-dir runs/harbor \
+  --agent-model provider/agent-model --optimizer-model provider/optimizer-model \
+  --methods reward_shaping,generalization --out runs/tb2-001
+```
+
+For TBLite, switch to `--benchmark tblite --benchmark-checkout ../OpenThoughts-TBLite`. Use `--baseline-only` to create a reusable baseline, then `--baseline-dir <prior-run> --num-candidates 3` for several independent edits. Terminal runs can add `--parallel-phases --n-concurrent 4`. Each run writes phase JSON files, `summary.json`, and `report.html` under the new `--out` directory.
 
 ## LLM configuration
 

@@ -31,15 +31,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jobs-dir", type=Path, required=True)
     parser.add_argument("--agent-model", required=True)
     parser.add_argument("--optimizer", choices=("pi", "llm"), default="pi")
-    parser.add_argument("--optimizer-model", required=True)
+    parser.add_argument("--optimizer-model")
     parser.add_argument("--pi-provider", help="Pi provider name, if needed")
     parser.add_argument("--methods", default="reward_shaping,generalization")
     parser.add_argument(
         "--scope", choices=("descriptions", "full"), default="descriptions"
     )
     parser.add_argument("--num-trials", type=int, default=1)
+    parser.add_argument("--n-concurrent", type=int, default=1)
+    parser.add_argument("--parallel-phases", action="store_true")
+    parser.add_argument("--num-candidates", type=int, default=1)
+    parser.add_argument("--baseline-dir", type=Path)
+    parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--out", type=Path, required=True, help="New output directory")
     args = parser.parse_args(argv)
+    if not args.baseline_only and not args.optimizer_model:
+        parser.error("--optimizer-model is required unless --baseline-only is set")
 
     benchmark_class = TerminalBench2 if args.benchmark == "tb2" else OpenThoughtsTBLite
     benchmark = benchmark_class(
@@ -50,19 +57,22 @@ def main(argv: list[str] | None = None) -> int:
         bun_linux_binary=args.bun_linux_binary,
         jobs_dir=args.jobs_dir,
         num_trials=args.num_trials,
+        n_concurrent=args.n_concurrent,
     )
     agent = OpenCodeAgent(args.agent_model)
     target = OpenCodeToolTarget(
         args.opencode_checkout, descriptions_only=args.scope == "descriptions"
     )
-    optimizer_kwargs = {"model": args.optimizer_model}
-    if args.optimizer == "pi" and args.pi_provider:
-        optimizer_kwargs["provider"] = args.pi_provider
-    optimizer = build_optimizer(
-        args.optimizer,
-        methods=[name.strip() for name in args.methods.split(",") if name.strip()],
-        **optimizer_kwargs,
-    )
+    optimizer = None
+    if not args.baseline_only:
+        optimizer_kwargs = {"model": args.optimizer_model}
+        if args.optimizer == "pi" and args.pi_provider:
+            optimizer_kwargs["provider"] = args.pi_provider
+        optimizer = build_optimizer(
+            args.optimizer,
+            methods=[name.strip() for name in args.methods.split(",") if name.strip()],
+            **optimizer_kwargs,
+        )
     result = run_five_phases(
         benchmark,
         agent,
@@ -71,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
         train=benchmark.tasks("train"),
         test=benchmark.tasks("test"),
         output_dir=args.out,
+        baseline_dir=args.baseline_dir,
+        num_candidates=args.num_candidates,
+        parallel_phases=args.parallel_phases,
     )
     print(f"Saved {result['optimization']['status']} run to {args.out}")
     return 0

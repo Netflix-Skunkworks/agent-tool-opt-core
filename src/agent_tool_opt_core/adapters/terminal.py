@@ -310,6 +310,8 @@ def _harbor_results(
 class HarborBenchmark(Benchmark):
     """A local-Docker Harbor job on a frozen TerminalBench/TBLite task split."""
 
+    parallel_safe = True
+
     def __init__(
         self,
         *,
@@ -321,6 +323,7 @@ class HarborBenchmark(Benchmark):
         bun_linux_binary: Path,
         jobs_dir: Path,
         num_trials: int = 1,
+        n_concurrent: int = 1,
         timeout_seconds: int = 7200,
     ) -> None:
         if dataset not in {"terminal-bench@2.0", "openthoughts-tblite"}:
@@ -355,13 +358,31 @@ class HarborBenchmark(Benchmark):
             raise ValueError("timeout_seconds must be positive")
         if num_trials < 1:
             raise ValueError("num_trials must be positive")
+        if n_concurrent < 1:
+            raise ValueError("n_concurrent must be positive")
         self.num_trials = num_trials
+        self.runs_per_task = 1
+        self.n_concurrent = n_concurrent
         self.timeout_seconds = timeout_seconds
 
     def tasks(self, split: str) -> list[str]:
         return list(self._splits[split])
 
     def evaluate(self, agent: Agent, tasks: list[str], tools: ToolSet) -> RunResult:
+        return self._evaluate(agent, tasks, tools, concurrency=self.n_concurrent)
+
+    def evaluate_parallel(
+        self, agent: Agent, tasks: list[str], tools: ToolSet
+    ) -> RunResult:
+        if self.n_concurrent < 2:
+            raise ValueError("parallel phases need at least two concurrency slots")
+        return self._evaluate(
+            agent, tasks, tools, concurrency=max(1, self.n_concurrent // 2)
+        )
+
+    def _evaluate(
+        self, agent: Agent, tasks: list[str], tools: ToolSet, *, concurrency: int
+    ) -> RunResult:
         if not isinstance(agent, OpenCodeAgent):
             raise TypeError("HarborBenchmark requires OpenCodeAgent")
         if not tasks or len(tasks) != len(set(tasks)):
@@ -403,7 +424,7 @@ class HarborBenchmark(Benchmark):
                 "--agent-kwarg",
                 f"overlay_dir={overlay}",
                 "--n-concurrent",
-                "1",
+                str(concurrency),
                 "--n-attempts",
                 str(self.num_trials),
             ]

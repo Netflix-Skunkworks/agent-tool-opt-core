@@ -331,6 +331,7 @@ class Tau2Benchmark(Benchmark):
         self._splits = {"train": tuple(train_tasks), "test": tuple(test_tasks)}
         self.max_steps = max_steps
         self.num_trials = num_trials
+        self.runs_per_task = num_trials
 
     def tasks(self, split: str) -> list[str]:
         return list(self._splits[split])

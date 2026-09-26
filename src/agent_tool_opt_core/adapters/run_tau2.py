@@ -25,16 +25,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent-model", required=True)
     parser.add_argument("--user-model", required=True)
     parser.add_argument("--optimizer", choices=("pi", "llm"), default="pi")
-    parser.add_argument("--optimizer-model", required=True)
+    parser.add_argument("--optimizer-model")
     parser.add_argument("--pi-provider", help="Pi provider name, if needed")
     parser.add_argument("--methods", default="reward_shaping,generalization")
     parser.add_argument(
         "--scope", choices=("descriptions", "full"), default="descriptions"
     )
     parser.add_argument("--num-trials", type=int, default=1)
+    parser.add_argument("--num-candidates", type=int, default=1)
+    parser.add_argument("--baseline-dir", type=Path)
+    parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument("--out", type=Path, required=True, help="New output directory")
     args = parser.parse_args(argv)
+    if not args.baseline_only and not args.optimizer_model:
+        parser.error("--optimizer-model is required unless --baseline-only is set")
 
     train, test = load_splits(args.split)
     benchmark = Tau2Benchmark(
@@ -46,14 +51,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     agent = Tau2Agent(args.agent_model, user_model=args.user_model)
     target = Tau2ToolTarget(args.domain, descriptions_only=args.scope == "descriptions")
-    optimizer_kwargs = {"model": args.optimizer_model}
-    if args.optimizer == "pi" and args.pi_provider:
-        optimizer_kwargs["provider"] = args.pi_provider
-    optimizer = build_optimizer(
-        args.optimizer,
-        methods=[name.strip() for name in args.methods.split(",") if name.strip()],
-        **optimizer_kwargs,
-    )
+    optimizer = None
+    if not args.baseline_only:
+        optimizer_kwargs = {"model": args.optimizer_model}
+        if args.optimizer == "pi" and args.pi_provider:
+            optimizer_kwargs["provider"] = args.pi_provider
+        optimizer = build_optimizer(
+            args.optimizer,
+            methods=[name.strip() for name in args.methods.split(",") if name.strip()],
+            **optimizer_kwargs,
+        )
     result = run_five_phases(
         benchmark,
         agent,
@@ -62,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         train=train,
         test=test,
         output_dir=args.out,
+        baseline_dir=args.baseline_dir,
+        num_candidates=args.num_candidates,
     )
     print(f"Saved {result['optimization']['status']} run to {args.out}")
     return 0

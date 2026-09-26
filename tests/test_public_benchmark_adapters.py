@@ -293,6 +293,7 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
     bun = tmp_path / "bun"
     bun.write_bytes(b"binary")
     snapshots = []
+    concurrency = []
 
     def fake_run(args, **kwargs):
         assert kwargs["check"] is False
@@ -306,6 +307,7 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
         )
         description = (overlay / "read.txt").read_text()
         snapshots.append((task, description, args[args.index("--model") + 1]))
+        concurrency.append(int(args[args.index("--n-concurrent") + 1]))
         trial_dir = job_dir / "trial-1" / "agent"
         trial_dir.mkdir(parents=True)
         (trial_dir / "trajectory.json").write_text(json.dumps({"steps": [description]}))
@@ -336,6 +338,7 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
         source_bundle=bundle,
         bun_linux_binary=bun,
         jobs_dir=tmp_path / "jobs",
+        n_concurrent=5,
     )
     agent = OpenCodeAgent("provider/model")
     baseline = collect_baseline(benchmark, agent, ["task-1"], target)
@@ -348,6 +351,9 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
         ("task-1", "Read a file.", "provider/model"),
         ("task-1", "Read only the requested file.", "provider/model"),
     ]
+    assert concurrency == [5, 5]
+    benchmark.evaluate_parallel(agent, ["task-1"], target.extract())
+    assert concurrency[-1] == 2
     assert target.effective_toolset() == target.extract()
 
 

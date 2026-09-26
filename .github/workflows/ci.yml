@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -e ".[metaflow]"
-      - run: python examples/metaflow_local_smoke.py show
-      - run: python examples/metaflow_local_smoke.py run --output-dir "$RUNNER_TEMP/ato-metaflow-smoke"
-      - run: python -c 'import json, os; from pathlib import Path; p=Path(os.environ["RUNNER_TEMP"])/"ato-metaflow-smoke"/"summary.json"; d=json.loads(p.read_text()); assert d["optimization"]["status"] == "candidate_applied"; assert d["comparison"]["test"]["avg_reward_delta"] == 1.0'
-      - run: python -c 'from metaflow import Flow; r=Flow("PublicAdapterSmoke").latest_successful_run; assert r is not None and r.data.summary["optimization"]["status"] == "candidate_applied"'
+      - run: python harness/run_harness_metaflow.py show
+      - run: python harness/run_harness_metaflow.py run --benchmark synthetic --output-dir "$RUNNER_TEMP/ato-metaflow-smoke"
+      - run: python -c 'import json, os; from pathlib import Path; root=Path(os.environ["RUNNER_TEMP"])/"ato-metaflow-smoke"; d=json.loads((root/"summary.json").read_text()); assert d["optimization"]["status"] == "candidate_applied"; assert d["comparison"]["test"]["avg_reward_delta"] == 1.0; assert all((root/f"{phase}.json").is_file() for phase in ("baseline_train", "baseline_test", "optimized_train", "optimized_test"))'
+      - run: python -c 'from metaflow import Flow; r=Flow("ToolOptimizationHarness").latest_successful_run; assert r is not None and r.data.summary["optimization"]["status"] == "candidate_applied"'

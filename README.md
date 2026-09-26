@@ -11,7 +11,7 @@ Provider-neutral building blocks for improving the tools exposed to AI agents fr
 - composable reward-shaping and generalization methods;
 - train/test separation and paired evaluation utilities;
 - normalized provider usage, estimated cost, and provenance metadata; and
-- an optional dependency on upstream Metaflow; the public orchestration harness is still being migrated.
+- an optional local Metaflow harness for the five-phase TauBench experiment.
 
 ## Installation
 
@@ -23,17 +23,33 @@ cd agent-tool-opt-core
 python -m pip install -e .
 ```
 
-The `metaflow` extra installs upstream Metaflow. The public orchestration harness is still being migrated.
+The `metaflow` extra installs upstream Metaflow. The harness runs the same five
+phases as the TauBench adapter: baseline train/test, train-only optimization,
+then candidate train/test evaluation. It runs locally without Netflix infrastructure.
 
-To smoke-test the public phase runner under Metaflow's local backend without a model key or Titus:
+To smoke-test the real flow graph without a model key:
 
 ```bash
 python -m pip install -e ".[metaflow]"
-python examples/metaflow_local_smoke.py show
-python examples/metaflow_local_smoke.py run --output-dir runs/metaflow-smoke
+python harness/run_harness_metaflow.py show
+python harness/run_harness_metaflow.py run --benchmark synthetic --output-dir runs/metaflow-smoke
 ```
 
-This synthetic example verifies local Metaflow execution and persisted phase artifacts; it is not the full benchmark Metaflow harness.
+The synthetic mode checks orchestration and artifacts only; it makes no model calls.
+For a live TauBench run, install its local checkout as described below, configure
+LiteLLM-supported provider credentials, and run:
+
+```bash
+python harness/run_harness_metaflow.py run \
+  --benchmark tau2 --domain airline --split splits/airline.json \
+  --agent-model provider/agent-model --user-model provider/user-model \
+  --optimizer pi --optimizer-model provider/optimizer-model \
+  --methods reward_shaping,generalization --output-dir runs/airline-metaflow
+```
+
+Each run persists `baseline_train.json`, `baseline_test.json`, candidate phase
+artifacts, `summary.json`, and `report.html` in a new output directory. Metaflow
+also stores the run's summary and phase data as flow artifacts.
 
 ## Benchmark source checkouts
 

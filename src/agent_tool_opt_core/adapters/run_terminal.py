@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_class = TerminalBench2 if args.benchmark == "tb2" else OpenThoughtsTBLite
     benchmark = benchmark_class(
         benchmark_checkout=args.benchmark_checkout,
+        opencode_checkout=args.opencode_checkout,
         split_manifest=args.split,
         source_bundle=args.source_bundle,
         bun_linux_binary=args.bun_linux_binary,

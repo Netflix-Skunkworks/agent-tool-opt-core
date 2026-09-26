@@ -1,17 +1,21 @@
 """TauBench Verified adapter; upstream ``tau2`` is installed separately.
 
-Description-only mode checks candidate source against the baseline AST before
-execution. The opt-in full-code mode preserves the @is_tool contracts but can
-change implementations. The upstream checkout is never written to disk. Runs
-sharing a process must be sequential: tau2's environment module holds the
-active tools class globally.
+Description-only mode exposes ``descriptions.md`` and a read-only tools.py,
+then splices docstrings and constructs TauBench schemas before execution. The
+opt-in full-code mode preserves @is_tool contracts but can change method
+implementations. The upstream checkout is never written to disk. Runs sharing
+a process must be sequential: tau2's environment module holds the active class.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import json
+import os
+import subprocess
 import sys
+import tempfile
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +32,12 @@ from agent_tool_opt_core.api import (
     Validator,
 )
 from agent_tool_opt_core.costs import total, usd
+from agent_tool_opt_core.adapters.tau2_descriptions import (
+    parse_descriptions,
+    render_descriptions,
+    splice_docstrings,
+    tool_docstrings,
+)
 
 _DOMAINS = {
     "airline": "AirlineTools",
@@ -35,9 +45,9 @@ _DOMAINS = {
     "telecom": "TelecomTools",
 }
 _DESCRIPTION_RULES = (
-    "Edit only docstrings on @is_tool methods in tools.py. Keep imports, "
-    "classes, method signatures, decorators, and executable code unchanged. "
-    "Preserve the meaning and required arguments of every tool."
+    "Edit only descriptions.md: each ## <tool> heading names an existing tool. "
+    "Keep every heading once and indent nonempty body lines four spaces. "
+    "tools.py is read-only context; do not change signatures or code."
 )
 _CODE_RULES = (
     "Edit tools.py while preserving the tools class, every @is_tool method name, "
@@ -86,16 +96,67 @@ def _tool_contracts(source: str, class_name: str) -> dict[str, str]:
     return contracts
 
 
-def _without_tool_docstrings(source: str) -> str:
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if _is_tool(node) and node.body and isinstance(node.body[0], ast.Expr):
-            value = node.body[0].value
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                value.value = ""
-    return ast.dump(tree, include_attributes=False)
+def _schema_import_check(
+    source: str, baseline_source: str | None = None
+) -> ValidationResult:
+    """Construct native Tau schemas in a subprocess, keeping output generic."""
+    script = (
+        "import json; import tools; "
+        "from agent_tool_opt_core.adapters.tau2_schema_validation import "
+        "validate_tool_schemas, validate_description_schemas; "
+    )
+    if baseline_source is None:
+        script += "validate_tool_schemas(tools); diagnostics = []"
+    else:
+        script += (
+            "import baseline_tools; "
+            "diagnostics = validate_description_schemas(baseline_tools, tools)"
+        )
+    script += "; print('ATOCHECK:' + json.dumps(diagnostics))"
+    with tempfile.TemporaryDirectory(prefix="ato-tau-schema-") as directory:
+        root = Path(directory)
+        (root / "tools.py").write_text(source, encoding="utf-8")
+        if baseline_source is not None:
+            (root / "baseline_tools.py").write_text(baseline_source, encoding="utf-8")
+        env = {
+            name: os.environ[name]
+            for name in ("PATH", "VIRTUAL_ENV", "PYTHONPATH", "LANG", "LC_ALL", "TZ")
+            if name in os.environ
+        }
+        env["HOME"] = str(root)
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return ValidationResult(False, "Tau schema validation timed out")
+    if result.returncode != 0:
+        return ValidationResult(False, "Tau schema validation failed")
+    marker = next(
+        (
+            line.removeprefix("ATOCHECK:")
+            for line in reversed(result.stdout.splitlines())
+            if line.startswith("ATOCHECK:")
+        ),
+        None,
+    )
+    if marker is None:
+        return ValidationResult(False, "Tau schema validation produced no result")
+    try:
+        diagnostics = json.loads(marker)
+    except json.JSONDecodeError:
+        return ValidationResult(False, "Tau schema validation produced invalid output")
+    if not isinstance(diagnostics, list) or not all(
+        isinstance(item, str) for item in diagnostics
+    ):
+        return ValidationResult(False, "Tau schema validation produced invalid output")
+    return ValidationResult(True, "\n".join(diagnostics) or "schemas constructed")
 
 
 @dataclass(frozen=True)
@@ -106,18 +167,18 @@ class Tau2DescriptionValidator(Validator):
         basic = super().validate(candidate)
         if not basic.ok:
             return basic
-        source = candidate.files.get("tools.py")
-        if source is None:
+        markdown = candidate.files.get("descriptions.md")
+        if markdown is None:
             return ValidationResult(True, "no change")
         try:
-            if _without_tool_docstrings(source) != _without_tool_docstrings(
-                self.baseline_source
-            ):
-                return ValidationResult(False, "only @is_tool docstrings may change")
+            names = set(tool_docstrings(self.baseline_source))
+            source = splice_docstrings(
+                self.baseline_source, parse_descriptions(markdown, names)
+            )
             compile(source, "tools.py", "exec")
         except (SyntaxError, ValueError) as exc:
-            return ValidationResult(False, f"invalid Python source: {exc}")
-        return ValidationResult(True, "docstrings-only edit")
+            return ValidationResult(False, f"invalid tool descriptions: {exc}")
+        return _schema_import_check(source, self.baseline_source)
 
 
 @dataclass(frozen=True)
@@ -140,7 +201,7 @@ class Tau2CodeValidator(Validator):
             compile(source, "tools.py", "exec")
         except (SyntaxError, ValueError) as exc:
             return ValidationResult(False, f"invalid Python source: {exc}")
-        return ValidationResult(True, "tool contracts preserved")
+        return _schema_import_check(source)
 
 
 class Tau2ToolTarget(ToolTarget):
@@ -165,18 +226,40 @@ class Tau2ToolTarget(ToolTarget):
         self._live_source = self._source
         self._original_class = getattr(self._environment, self._class_name)
         self._candidate_module_name = f"tau2.domains.{domain}._ato_candidate_tools"
+        try:
+            data_dir = Path(importlib.import_module("tau2.utils.utils").DATA_DIR)
+            policy = data_dir / "tau2" / "domains" / domain / "policy.md"
+            self._policy = (
+                policy.read_text(encoding="utf-8") if policy.is_file() else None
+            )
+        except (ImportError, AttributeError):
+            self._policy = None
+
+    def _toolset(self, source: str) -> ToolSet:
+        context = {"policy.md": self._policy} if self._policy else {}
+        if self.descriptions_only:
+            context["tools.py"] = source
+            return ToolSet(
+                {"descriptions.md": render_descriptions(source)},
+                ("descriptions.md",),
+                self.language_rules,
+                context,
+            )
+        return ToolSet(
+            {"tools.py": source}, ("tools.py",), self.language_rules, context
+        )
 
     def extract(self) -> ToolSet:
-        return ToolSet({"tools.py": self._source}, ("tools.py",), self.language_rules)
+        return self._toolset(self._source)
 
     def effective_toolset(self) -> ToolSet:
-        return ToolSet(
-            {"tools.py": self._live_source}, ("tools.py",), self.language_rules
-        )
+        return self._toolset(self._live_source)
 
     def validator(self) -> Validator:
         if self.descriptions_only:
-            return Tau2DescriptionValidator(self.kind, ("tools.py",), self._source)
+            return Tau2DescriptionValidator(
+                self.kind, ("descriptions.md",), self._source
+            )
         return Tau2CodeValidator(
             self.kind, ("tools.py",), self._source, self._class_name
         )
@@ -185,7 +268,18 @@ class Tau2ToolTarget(ToolTarget):
         result = self.validator().validate(candidate)
         if not result.ok:
             raise ValueError(result.log)
-        source = candidate.files.get("tools.py")
+        if self.descriptions_only:
+            markdown = candidate.files.get("descriptions.md")
+            source = (
+                splice_docstrings(
+                    self._source,
+                    parse_descriptions(markdown, set(tool_docstrings(self._source))),
+                )
+                if markdown is not None
+                else None
+            )
+        else:
+            source = candidate.files.get("tools.py")
         if source is None:
             return
         self.restore()

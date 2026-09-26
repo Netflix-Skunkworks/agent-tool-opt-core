@@ -31,6 +31,7 @@ from agent_tool_opt_core.api import (
     Validator,
 )
 from agent_tool_opt_core.costs import usd
+from agent_tool_opt_core.adapters.opencode_bundle import check_bundle
 
 _DESCRIPTION_RULES = (
     "Edit only the companion .txt tool descriptions. Preserve each tool's "
@@ -253,6 +254,21 @@ def _harbor_results(
         if not trajectory_path.is_file():
             raise RuntimeError(f"Harbor trial has no agent trajectory for {name}")
         trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        instruction = trial.get("instruction") or trial.get("task_instruction")
+        if not instruction:
+            trial_result_path = trial_dir / "result.json"
+            if trial_result_path.is_file():
+                trial_result = json.loads(trial_result_path.read_text(encoding="utf-8"))
+                instruction = trial_result.get("instruction") or trial_result.get(
+                    "task_instruction"
+                )
+        if (
+            isinstance(trajectory, dict)
+            and isinstance(instruction, str)
+            and instruction
+            and not trajectory.get("instruction")
+        ):
+            trajectory = {"instruction": instruction, **trajectory}
         context = trial.get("agent_result") or {}
         cost = context.get("cost_usd")
         if cost is not None and usd(cost) is None:
@@ -299,6 +315,7 @@ class HarborBenchmark(Benchmark):
         *,
         dataset: str,
         benchmark_checkout: Path,
+        opencode_checkout: Path,
         split_manifest: Path,
         source_bundle: Path,
         bun_linux_binary: Path,
@@ -326,9 +343,13 @@ class HarborBenchmark(Benchmark):
                     f"task is not in the local benchmark checkout: {task_name}"
                 )
         self.source_bundle = Path(source_bundle).expanduser().resolve(strict=True)
+        self.opencode_checkout = (
+            Path(opencode_checkout).expanduser().resolve(strict=True)
+        )
         self.bun_linux_binary = Path(bun_linux_binary).expanduser().resolve(strict=True)
         if not self.source_bundle.is_file() or not self.bun_linux_binary.is_file():
             raise ValueError("source bundle and Linux Bun binary must be files")
+        check_bundle(self.source_bundle, self.opencode_checkout)
         self.jobs_dir = Path(jobs_dir).expanduser().resolve()
         if timeout_seconds < 1:
             raise ValueError("timeout_seconds must be positive")

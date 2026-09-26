@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
+import tarfile
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,12 @@ from agent_tool_opt_core.adapters.tau2 import (
     Tau2CodeValidator,
     Tau2DescriptionValidator,
     Tau2ToolTarget,
+    _schema_import_check,
+)
+from agent_tool_opt_core.adapters.tau2_descriptions import (
+    parse_descriptions,
+    render_descriptions,
+    splice_docstrings,
 )
 from agent_tool_opt_core.adapters.terminal import (
     OpenCodeAgent,
@@ -26,7 +34,8 @@ from agent_tool_opt_core.adapters.terminal import (
     _harbor_results,
     load_splits,
 )
-from agent_tool_opt_core.api import Candidate
+from agent_tool_opt_core.adapters.opencode_bundle import check_bundle
+from agent_tool_opt_core.api import Candidate, ValidationResult
 from agent_tool_opt_core.driver import collect_baseline, evaluate_candidate
 
 
@@ -42,21 +51,67 @@ class AirlineTools:
 '''
 
 
-def test_tau2_validator_rejects_code_and_signature_changes():
-    validator = Tau2DescriptionValidator("py", ("tools.py",), _TOOLS)
-    good = _TOOLS.replace(
+def test_tau2_description_markdown_round_trip_and_heading_gate():
+    original = render_descriptions(_TOOLS)
+    revised = original.replace("Look up a reservation by ID.", "Look up café IDs.")
+    docs = parse_descriptions(revised, {"lookup"})
+    source = splice_docstrings(_TOOLS, docs)
+    assert "Look up café IDs." in source
+    assert (
+        source.replace(repr("Look up café IDs."), '"""Look up a reservation by ID."""')
+        == _TOOLS
+    )
+    assert "return reservation_id" in source
+    with pytest.raises(ValueError, match="duplicate"):
+        parse_descriptions(revised + "\n## lookup\n    duplicate\n", {"lookup"})
+    with pytest.raises(ValueError, match="indented"):
+        parse_descriptions("## lookup\nnot indented", {"lookup"})
+
+
+def test_tau2_schema_check_uses_subprocess_without_api_keys(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "not-for-candidate")
+
+    def fake_run(args, **kwargs):
+        compile(args[2], "schema-check", "exec")
+        assert "OPENAI_API_KEY" not in kwargs["env"]
+        assert (kwargs["cwd"] / "tools.py").read_text() == _TOOLS
+        assert (kwargs["cwd"] / "baseline_tools.py").read_text() == _TOOLS
+        return SimpleNamespace(returncode=0, stdout='ATOCHECK:["doc changed"]\n')
+
+    monkeypatch.setattr("agent_tool_opt_core.adapters.tau2.subprocess.run", fake_run)
+    result = _schema_import_check(_TOOLS, _TOOLS)
+    assert result == ValidationResult(True, "doc changed")
+
+
+def test_tau2_description_surface_and_validator(monkeypatch):
+    checked = []
+    monkeypatch.setattr(
+        "agent_tool_opt_core.adapters.tau2._schema_import_check",
+        lambda source, baseline=None: (
+            checked.append((source, baseline))
+            or ValidationResult(True, "schemas constructed")
+        ),
+    )
+    validator = Tau2DescriptionValidator("py", ("descriptions.md",), _TOOLS)
+    original = render_descriptions(_TOOLS)
+    good = original.replace(
         "Look up a reservation by ID.", "Use the exact reservation ID."
     )
-    assert validator.validate(Candidate({"tools.py": good})).ok
+    assert validator.validate(Candidate({"descriptions.md": good})).ok
+    assert checked[0][1] == _TOOLS
+    assert "Use the exact reservation ID." in checked[0][0]
+    assert "return reservation_id" in checked[0][0]
+    assert not validator.validate(Candidate({"tools.py": _TOOLS})).ok
     assert not validator.validate(
-        Candidate({"tools.py": good.replace("return reservation_id", "return None")})
-    ).ok
-    assert not validator.validate(
-        Candidate({"tools.py": good.replace("reservation_id: str", "id: str")})
+        Candidate({"descriptions.md": good.replace("## lookup", "## wrong")})
     ).ok
 
 
-def test_tau2_code_mode_preserves_tool_contract_but_allows_body_edit():
+def test_tau2_code_mode_preserves_tool_contract_but_allows_body_edit(monkeypatch):
+    monkeypatch.setattr(
+        "agent_tool_opt_core.adapters.tau2._schema_import_check",
+        lambda source, baseline=None: ValidationResult(True, "schemas constructed"),
+    )
     validator = Tau2CodeValidator("py", ("tools.py",), _TOOLS, "AirlineTools")
     body_edit = _TOOLS.replace("return reservation_id", "return reservation_id.upper()")
     assert validator.validate(Candidate({"tools.py": body_edit})).ok
@@ -66,6 +121,10 @@ def test_tau2_code_mode_preserves_tool_contract_but_allows_body_edit():
 
 
 def test_tau2_tool_target_swaps_and_restores_class(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "agent_tool_opt_core.adapters.tau2._schema_import_check",
+        lambda source, baseline=None: ValidationResult(True, "schemas constructed"),
+    )
     source_file = tmp_path / "tools.py"
     source_file.write_text(_TOOLS)
     tools_module = types.ModuleType("tau2.domains.airline.tools")
@@ -75,13 +134,25 @@ def test_tau2_tool_target_swaps_and_restores_class(monkeypatch, tmp_path):
     environment.AirlineTools = original
     monkeypatch.setitem(sys.modules, tools_module.__name__, tools_module)
     monkeypatch.setitem(sys.modules, environment.__name__, environment)
+    data_dir = tmp_path / "data"
+    policy = data_dir / "tau2" / "domains" / "airline" / "policy.md"
+    policy.parent.mkdir(parents=True)
+    policy.write_text("Airline policy")
+    utils = types.ModuleType("tau2.utils.utils")
+    utils.DATA_DIR = data_dir
+    monkeypatch.setitem(sys.modules, utils.__name__, utils)
 
     target = Tau2ToolTarget("airline")
-    edited = _TOOLS.replace("Look up a reservation by ID.", "Use the exact ID.")
-    target.apply(Candidate({"tools.py": edited}))
+    assert set(target.extract().files) == {"descriptions.md"}
+    assert target.extract().context["tools.py"] == _TOOLS
+    assert target.extract().context["policy.md"] == "Airline policy"
+    edited = render_descriptions(_TOOLS).replace(
+        "Look up a reservation by ID.", "Use the exact ID."
+    )
+    target.apply(Candidate({"descriptions.md": edited}))
     assert environment.AirlineTools is not original
     assert environment.AirlineTools().lookup("ABC") == "ABC"
-    assert "Use the exact ID" in target.effective_toolset().files["tools.py"]
+    assert "Use the exact ID" in target.effective_toolset().files["descriptions.md"]
     target.restore()
     assert environment.AirlineTools is original
     assert target.effective_toolset() == target.extract()
@@ -146,6 +217,11 @@ def _opencode_checkout(tmp_path: Path) -> Path:
     tool_dir = root / "packages" / "opencode" / "src" / "tool"
     (tool_dir / "shell").mkdir(parents=True)
     (root / "package.json").write_text("{}")
+    (root / "bun.lock").write_text("lock")
+    (root / "packages" / "opencode" / "package.json").write_text("{}")
+    (root / "packages" / "opencode" / "src" / "index.ts").write_text("// entry")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "dependency.txt").write_text("installed")
     (tool_dir / "read.ts").write_text(
         'import DESCRIPTION from "./read.txt"\nexport const ReadTool = Tool.define("read", {})'
     )
@@ -156,6 +232,14 @@ def _opencode_checkout(tmp_path: Path) -> Path:
     )
     (tool_dir / "shell" / "shell.txt").write_text("Run a shell command.")
     return root
+
+
+def _source_bundle(checkout: Path, path: Path) -> Path:
+    with tarfile.open(path, "w") as archive:
+        for source in sorted(checkout.rglob("*")):
+            if source.is_file():
+                archive.add(source, arcname=source.relative_to(checkout).as_posix())
+    return path
 
 
 def test_opencode_target_discovers_nested_imported_descriptions(tmp_path):
@@ -205,8 +289,7 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
     for name in ("task-1", "task-2"):
         (checkout / name).mkdir(parents=True)
         (checkout / name / "task.toml").write_text("")
-    bundle = tmp_path / "source.tar"
-    bundle.write_bytes(b"bundle")
+    bundle = _source_bundle(source, tmp_path / "source.tar")
     bun = tmp_path / "bun"
     bun.write_bytes(b"binary")
     snapshots = []
@@ -248,6 +331,7 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
     )
     benchmark = TerminalBench2(
         benchmark_checkout=checkout,
+        opencode_checkout=source,
         split_manifest=manifest,
         source_bundle=bundle,
         bun_linux_binary=bun,
@@ -287,6 +371,32 @@ def test_harbor_missing_reward_is_not_scored_as_zero(tmp_path):
         _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model")
 
 
+def test_harbor_restores_instruction_from_trial_result(tmp_path):
+    job = tmp_path / "job"
+    trial = job / "trial-1"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "agent" / "trajectory.json").write_text('{"steps": []}')
+    (trial / "result.json").write_text('{"instruction": "Fix the build"}')
+    (job / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_results": [
+                    {
+                        "task_name": "task-1",
+                        "trial_name": "trial-1",
+                        "verifier_result": {"rewards": {"reward": 0}},
+                    }
+                ]
+            }
+        )
+    )
+    run = _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model")
+    assert run.runs[0].trajectory == {
+        "instruction": "Fix the build",
+        "steps": [],
+    }
+
+
 def test_harbor_repeated_trials_aggregate_reward_transcripts_and_cost(tmp_path):
     job = tmp_path / "job"
     trials = []
@@ -316,8 +426,8 @@ def test_terminal_split_manifest_and_both_dataset_classes(tmp_path):
     manifest = tmp_path / "split.json"
     manifest.write_text(json.dumps({"train": ["a"], "test": ["b"]}))
     assert load_splits(manifest) == (["a"], ["b"])
-    bundle = tmp_path / "bundle.tar"
-    bundle.write_bytes(b"x")
+    opencode = _opencode_checkout(tmp_path)
+    bundle = _source_bundle(opencode, tmp_path / "bundle.tar")
     bun = tmp_path / "bun"
     bun.write_bytes(b"x")
     checkout = tmp_path / "tasks"
@@ -326,6 +436,7 @@ def test_terminal_split_manifest_and_both_dataset_classes(tmp_path):
         (checkout / name / "task.toml").write_text("")
     kwargs = dict(
         benchmark_checkout=checkout,
+        opencode_checkout=opencode,
         split_manifest=manifest,
         source_bundle=bundle,
         bun_linux_binary=bun,
@@ -336,3 +447,42 @@ def test_terminal_split_manifest_and_both_dataset_classes(tmp_path):
     manifest.write_text(json.dumps({"train": ["a"], "test": ["a"]}))
     with pytest.raises(ValueError, match="overlap"):
         load_splits(manifest)
+
+
+def test_opencode_bundle_must_match_local_tool_checkout(tmp_path):
+    checkout = _opencode_checkout(tmp_path)
+    bundle = _source_bundle(checkout, tmp_path / "source.tar")
+    check_bundle(bundle, checkout)
+    (checkout / "packages" / "opencode" / "src" / "tool" / "read.txt").write_text(
+        "changed after bundling"
+    )
+    with pytest.raises(ValueError, match="differs"):
+        check_bundle(bundle, checkout)
+    tasks = tmp_path / "tasks"
+    for name in ("a", "b"):
+        (tasks / name).mkdir(parents=True)
+        (tasks / name / "task.toml").write_text("")
+    manifest = tmp_path / "split.json"
+    manifest.write_text(json.dumps({"train": ["a"], "test": ["b"]}))
+    bun = tmp_path / "bun"
+    bun.write_bytes(b"binary")
+    with pytest.raises(ValueError, match="differs"):
+        TerminalBench2(
+            benchmark_checkout=tasks,
+            opencode_checkout=checkout,
+            split_manifest=manifest,
+            source_bundle=bundle,
+            bun_linux_binary=bun,
+            jobs_dir=tmp_path / "jobs",
+        )
+
+
+def test_opencode_bundle_rejects_escaping_member(tmp_path):
+    bundle = tmp_path / "malicious.tar"
+    with tarfile.open(bundle, "w") as archive:
+        payload = b"bad"
+        info = tarfile.TarInfo("../escape")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    with pytest.raises(ValueError, match="unsafe"):
+        check_bundle(bundle)

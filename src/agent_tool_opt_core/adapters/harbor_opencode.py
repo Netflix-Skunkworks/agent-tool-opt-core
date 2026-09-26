@@ -7,7 +7,6 @@ run inside the benchmark sandbox. Tool files are overlaid before OpenCode starts
 
 from __future__ import annotations
 
-import tarfile
 import tempfile
 import shlex
 from pathlib import Path, PurePosixPath
@@ -16,6 +15,7 @@ from pydantic import Field
 
 from harbor.agents.installed.opencode import OpenCode, OpenCodeOptions
 from harbor.environments.base import BaseEnvironment
+from agent_tool_opt_core.adapters.opencode_bundle import check_bundle
 
 _ROOT = "/opt/ato-opencode"
 _SOURCE = f"{_ROOT}/source"
@@ -31,35 +31,6 @@ for arg in "$@"; do
 done
 exec /opt/ato-opencode/bun run --cwd /opt/ato-opencode/source/packages/opencode --conditions=browser src/index.ts "${args[@]}"
 """
-
-
-def _check_bundle(path: Path) -> None:
-    if not path.is_file() or not tarfile.is_tarfile(path):
-        raise ValueError("source_bundle must be a tar archive")
-    required = {"package.json", "packages/opencode/src/index.ts"}
-    names: set[str] = set()
-    total_size = 0
-    with tarfile.open(path, "r:*") as archive:
-        for index, member in enumerate(archive):
-            if index >= 200_000:
-                raise ValueError("source_bundle has too many entries")
-            rel = PurePosixPath(member.name)
-            if (
-                rel.is_absolute()
-                or ".." in rel.parts
-                or not (member.isfile() or member.isdir())
-            ):
-                raise ValueError("source_bundle contains unsafe entries")
-            total_size += member.size
-            if total_size > 8_000_000_000:
-                raise ValueError("source_bundle exceeds 8 GB uncompressed")
-            names.add(rel.as_posix().removeprefix("./"))
-    if not required <= names or not any(
-        name.startswith("node_modules/") for name in names
-    ):
-        raise ValueError(
-            "source_bundle needs OpenCode source and installed node_modules"
-        )
 
 
 class SourceOpenCodeOptions(OpenCodeOptions):
@@ -91,7 +62,7 @@ class SourceOpenCode(OpenCode):
         self._bundle = Path(source_bundle).expanduser().resolve(strict=True)
         self._bun = Path(bun_linux_binary).expanduser().resolve(strict=True)
         self._overlay = Path(overlay_dir).expanduser().resolve(strict=True)
-        _check_bundle(self._bundle)
+        check_bundle(self._bundle)
         if not self._bun.is_file() or not self._overlay.is_dir():
             raise ValueError("Bun executable and overlay directory are required")
         with self._bun.open("rb") as binary:

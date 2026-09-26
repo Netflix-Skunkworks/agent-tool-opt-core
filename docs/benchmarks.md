@@ -42,51 +42,29 @@ cd ../agent-tool-opt-core
 
 Pass that tarball and the absolute path to a Linux Bun executable as `source_bundle` and `bun_linux_binary`. The bundle must contain the root `package.json`, `packages/opencode/src/index.ts`, and `node_modules`. The custom Harbor agent checks these inputs, uploads them to each local-Docker sandbox, overlays the baseline or candidate tool files, then starts OpenCode. It does not run a package manager or download an installer in the sandbox. Configure model credentials through Harbor/OpenCode outside this repository; do not put them in the split manifest or source bundle.
 
-Both tool targets default to description-only optimization. To port the original adapters' full-code scope, construct either target with `descriptions_only=False`; TauBench then allows implementation edits while preserving `@is_tool` names, decorators, and signatures, and OpenCode exposes active `.ts` modules alongside `.txt` descriptions. The TypeScript gate requires Bun on the host and parse-checks changed modules. Full-code candidates execute generated code: use a disposable, isolated environment and scoped model credentials, especially for TauBench's in-process class swap.
+Both tool targets default to description-only optimization. Pass `--scope full` to enable the original adapters' full-code scope: TauBench permits implementation edits while preserving `@is_tool` contracts, and OpenCode exposes active `.ts` modules alongside `.txt` descriptions. The TypeScript gate requires Bun on the host and parse-checks changed modules. Full-code candidates execute generated code: use a disposable, isolated environment and scoped model credentials, especially for TauBench's in-process class swap.
 
-The adapters implement the core `Benchmark`, `Agent`, and `ToolTarget` interfaces. For example:
+The public runners keep the original five phases: baseline train, baseline test, optimize on train transcripts only, optimized train, and optimized test. With frozen split JSON files and real model names, invoke them as follows:
 
-```python
-from pathlib import Path
-from agent_tool_opt_core.adapters.tau2 import Tau2Agent, Tau2Benchmark, Tau2ToolTarget
-from agent_tool_opt_core.adapters.terminal import (
-    OpenCodeAgent,
-    OpenCodeToolTarget,
-    TerminalBench2,
-)
-from agent_tool_opt_core.driver import optimize
-from agent_tool_opt_core.optimizers.pi import PiOptimizer
+```bash
+python -m agent_tool_opt_core.adapters.run_tau2 \
+  --domain airline --split splits/airline.json \
+  --agent-model agent-model --user-model user-simulator-model \
+  --optimizer pi --optimizer-model optimizer-model \
+  --methods reward_shaping,generalization --num-trials 3 \
+  --out runs/airline-001
 
-# Choose and freeze disjoint TauBench task IDs before running.
-tau_benchmark = Tau2Benchmark(
-    "airline", train_tasks=["train-id"], test_tasks=["test-id"]
-)
-tau_agent = Tau2Agent("agent-model", user_model="user-simulator-model")
-tau_target = Tau2ToolTarget("airline")
-
-# Or use TerminalBench2; OpenThoughtsTBLite has the same constructor.
-terminal_benchmark = TerminalBench2(
-    benchmark_checkout=Path("../terminal-bench-2"),
-    split_manifest=Path("splits/terminal.json"),
-    source_bundle=Path("../opencode-source-linux.tar"),
-    bun_linux_binary=Path("/absolute/path/to/linux/bun"),
-    jobs_dir=Path("runs/harbor"),
-)
-terminal_agent = OpenCodeAgent("provider/agent-model")
-terminal_target = OpenCodeToolTarget(Path("../opencode"))
-
-optimizer = PiOptimizer(model="optimizer-model", provider="optimizer-provider")
-candidate, test_metrics = optimize(
-    terminal_benchmark,
-    terminal_agent,
-    terminal_target,
-    optimizer,
-    train=terminal_benchmark.tasks("train"),
-    test=terminal_benchmark.tasks("test"),
-    scratch=Path("runs/optimizer"),
-)
+python -m agent_tool_opt_core.adapters.run_terminal \
+  --benchmark tb2 --benchmark-checkout ../terminal-bench-2 \
+  --opencode-checkout ../opencode --split splits/tb2.json \
+  --source-bundle ../opencode-source-linux.tar \
+  --bun-linux-binary /absolute/path/to/linux/bun \
+  --jobs-dir runs/harbor --agent-model provider/agent-model \
+  --optimizer pi --optimizer-model optimizer-model \
+  --methods reward_shaping,generalization --num-trials 3 \
+  --out runs/tb2-001
 ```
 
-Replace the illustrative task/model values with actual IDs and configured provider models. Run `optimize` with the TauBench triplet instead to optimize TauBench descriptions. Keep baseline and candidate evaluations on the same task IDs, agent model, and runtime. Terminal runs currently use one Harbor trial per task. The adapters are unit-tested with a mocked runner, but live Harbor and TauBench executions have not yet been verified; run a small smoke task before using them for a study.
+For TBLite, use `--benchmark tblite` and `--benchmark-checkout ../OpenThoughts-TBLite`. Substitute configured model IDs, provider credentials, and actual task IDs; `--out` must name a new directory. Each run saves separate `baseline_train.json`, `baseline_test.json`, `optimized_train.json`, and `optimized_test.json` phase files, plus `summary.json` and candidate files. If no valid edit is produced, only baseline phases are saved and the summary says why. Phase results include task reward, raw transcript, and known/unknown benchmark-reported model cost; optimizer cost is separate. Docker compute and other infrastructure charges are not estimated. Keep task IDs, models, trial count, and runtime fixed across the A/B arms. The optimizer receives only training transcripts, and the held-out baseline file is not written until its proposal returns; for strict filesystem isolation, configure `PiOptimizer.sandbox_cmd` through the Python API or run the CLI in an isolated environment. The public runners have offline tests, but live Harbor and TauBench executions have not yet been verified; run a small smoke task before using them for a study.
 
 The benchmark projects change independently. Record each checkout's Git commit alongside results and confirm its own dependency and license terms before distributing any derived artifacts.

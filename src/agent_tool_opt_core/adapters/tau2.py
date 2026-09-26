@@ -222,6 +222,7 @@ class Tau2Benchmark(Benchmark):
         train_tasks: list[str],
         test_tasks: list[str],
         max_steps: int = 30,
+        num_trials: int = 1,
     ) -> None:
         if domain not in _DOMAINS:
             raise ValueError(f"unsupported tau2 domain: {domain}")
@@ -229,10 +230,13 @@ class Tau2Benchmark(Benchmark):
             raise ValueError("train and test tasks overlap")
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
+        if num_trials < 1:
+            raise ValueError("num_trials must be positive")
         self.name = f"tau2-{domain}"
         self.domain = domain
         self._splits = {"train": tuple(train_tasks), "test": tuple(test_tasks)}
         self.max_steps = max_steps
+        self.num_trials = num_trials
 
     def tasks(self, split: str) -> list[str]:
         return list(self._splits[split])
@@ -255,7 +259,7 @@ class Tau2Benchmark(Benchmark):
             llm_user=agent.user_model,
             llm_args_agent={"temperature": 0.0},
             llm_args_user={"temperature": 0.0},
-            num_trials=1,
+            num_trials=self.num_trials,
             max_steps=self.max_steps,
             save_to=None,
             console_display=False,
@@ -280,6 +284,11 @@ class Tau2Benchmark(Benchmark):
                     known_cost_usd=sum(v for v in values if v is not None),
                 )
             )
-        if sorted(r.task_id for r in runs) != sorted(tasks):
+        counts = {name: 0 for name in tasks}
+        for run in runs:
+            if run.task_id not in counts:
+                raise RuntimeError("tau2 returned an unexpected task result")
+            counts[run.task_id] += 1
+        if any(count != self.num_trials for count in counts.values()):
             raise RuntimeError("tau2 returned incomplete task results")
         return RunResult(self.name, agent.id, tuple(runs))

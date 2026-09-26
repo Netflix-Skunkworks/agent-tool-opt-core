@@ -10,6 +10,7 @@ before the agent starts. Upstream repositories are never modified.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ from agent_tool_opt_core.api import (
     ValidationResult,
     Validator,
 )
+from agent_tool_opt_core.costs import usd
 
 _DESCRIPTION_RULES = (
     "Edit only the companion .txt tool descriptions. Preserve each tool's "
@@ -211,25 +213,40 @@ def load_splits(path: Path) -> tuple[list[str], list[str]]:
 
 
 def _harbor_results(
-    job_dir: Path, task_names: list[str], benchmark: str, agent: str
+    job_dir: Path,
+    task_names: list[str],
+    benchmark: str,
+    agent: str,
+    num_trials: int = 1,
 ) -> RunResult:
     data = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
     trials = data.get("trial_results")
-    if not isinstance(trials, list) or len(trials) != len(task_names):
+    if not isinstance(trials, list) or len(trials) != len(task_names) * num_trials:
         raise RuntimeError("Harbor returned incomplete trial results")
-    runs: dict[str, TaskRun] = {}
+    grouped: dict[str, list[TaskRun]] = {name: [] for name in task_names}
+    seen_trials: set[str] = set()
     for trial in trials:
         name = trial.get("task_name")
-        if name not in task_names or name in runs:
-            raise RuntimeError("Harbor returned an unexpected or duplicate task")
+        trial_name = trial.get("trial_name")
+        if (
+            name not in grouped
+            or not isinstance(trial_name, str)
+            or trial_name in seen_trials
+        ):
+            raise RuntimeError("Harbor returned an unexpected or duplicate trial")
+        seen_trials.add(trial_name)
         if trial.get("exception_info"):
             raise RuntimeError(f"Harbor trial failed for {name}")
         verifier = trial.get("verifier_result") or {}
         rewards = verifier.get("rewards") or {}
         reward = rewards.get("reward")
-        if not isinstance(reward, (int, float)) or isinstance(reward, bool):
+        if (
+            not isinstance(reward, (int, float))
+            or isinstance(reward, bool)
+            or not math.isfinite(reward)
+        ):
             raise RuntimeError(f"Harbor trial has no numeric reward for {name}")
-        trial_dir = (job_dir / trial["trial_name"]).resolve()
+        trial_dir = (job_dir / trial_name).resolve()
         if not trial_dir.is_relative_to(job_dir.resolve()):
             raise RuntimeError("Harbor trial path escapes its job directory")
         trajectory_path = trial_dir / "agent" / "trajectory.json"
@@ -238,16 +255,40 @@ def _harbor_results(
         trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
         context = trial.get("agent_result") or {}
         cost = context.get("cost_usd")
-        if cost is not None and (not isinstance(cost, (int, float)) or cost < 0):
+        if cost is not None and usd(cost) is None:
             raise RuntimeError(f"Harbor trial has invalid cost for {name}")
-        runs[name] = TaskRun(
-            task_id=name,
-            reward=float(reward),
-            trajectory=trajectory,
-            cost_usd=float(cost) if cost is not None else None,
-            known_cost_usd=float(cost) if cost is not None else 0.0,
+        grouped[name].append(
+            TaskRun(
+                task_id=name,
+                reward=float(reward),
+                trajectory=trajectory,
+                cost_usd=float(cost) if cost is not None else None,
+                known_cost_usd=float(cost) if cost is not None else 0.0,
+            )
         )
-    return RunResult(benchmark, agent, tuple(runs[name] for name in task_names))
+    runs = []
+    for name in task_names:
+        attempts = grouped[name]
+        if len(attempts) != num_trials:
+            raise RuntimeError(f"Harbor returned incomplete attempts for {name}")
+        runs.append(
+            TaskRun(
+                task_id=name,
+                reward=sum(attempt.reward for attempt in attempts) / num_trials,
+                trajectory=(
+                    attempts[0].trajectory
+                    if num_trials == 1
+                    else [attempt.trajectory for attempt in attempts]
+                ),
+                cost_usd=(
+                    sum(attempt.cost_usd for attempt in attempts)
+                    if all(attempt.cost_usd is not None for attempt in attempts)
+                    else None
+                ),
+                known_cost_usd=sum(attempt.known_cost_usd for attempt in attempts),
+            )
+        )
+    return RunResult(benchmark, agent, tuple(runs))
 
 
 class HarborBenchmark(Benchmark):
@@ -262,6 +303,7 @@ class HarborBenchmark(Benchmark):
         source_bundle: Path,
         bun_linux_binary: Path,
         jobs_dir: Path,
+        num_trials: int = 1,
         timeout_seconds: int = 7200,
     ) -> None:
         if dataset not in {"terminal-bench@2.0", "openthoughts-tblite"}:
@@ -290,6 +332,9 @@ class HarborBenchmark(Benchmark):
         self.jobs_dir = Path(jobs_dir).expanduser().resolve()
         if timeout_seconds < 1:
             raise ValueError("timeout_seconds must be positive")
+        if num_trials < 1:
+            raise ValueError("num_trials must be positive")
+        self.num_trials = num_trials
         self.timeout_seconds = timeout_seconds
 
     def tasks(self, split: str) -> list[str]:
@@ -338,6 +383,8 @@ class HarborBenchmark(Benchmark):
                 f"overlay_dir={overlay}",
                 "--n-concurrent",
                 "1",
+                "--n-attempts",
+                str(self.num_trials),
             ]
             for name in tasks:
                 args.extend(("--include-task-name", name))
@@ -352,7 +399,9 @@ class HarborBenchmark(Benchmark):
                 raise RuntimeError(
                     f"Harbor job failed (exit {result.returncode}); inspect the local job logs"
                 )
-            return _harbor_results(self.jobs_dir / job_name, tasks, self.name, agent.id)
+            return _harbor_results(
+                self.jobs_dir / job_name, tasks, self.name, agent.id, self.num_trials
+            )
 
 
 class TerminalBench2(HarborBenchmark):

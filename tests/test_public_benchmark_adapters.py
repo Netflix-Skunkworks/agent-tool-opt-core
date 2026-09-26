@@ -131,6 +131,14 @@ def test_tau2_runner_preserves_transcript_reward_and_cost(monkeypatch):
     assert result.runs[0].cost_usd == pytest.approx(0.15)
     assert calls["llm_agent"] == "agent-model"
     assert calls["llm_user"] == "user-model"
+    assert calls["num_trials"] == 1
+    repeated = Tau2Benchmark(
+        "airline", train_tasks=["t1"], test_tasks=["t2"], num_trials=2
+    )
+    with pytest.raises(RuntimeError, match="incomplete"):
+        repeated.evaluate(
+            Tau2Agent("agent-model", user_model="user-model"), ["t1"], None
+        )
 
 
 def _opencode_checkout(tmp_path: Path) -> Path:
@@ -277,6 +285,31 @@ def test_harbor_missing_reward_is_not_scored_as_zero(tmp_path):
     )
     with pytest.raises(RuntimeError, match="no numeric reward"):
         _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model")
+
+
+def test_harbor_repeated_trials_aggregate_reward_transcripts_and_cost(tmp_path):
+    job = tmp_path / "job"
+    trials = []
+    for index, reward in enumerate((0.0, 1.0), start=1):
+        name = f"trial-{index}"
+        trajectory = job / name / "agent"
+        trajectory.mkdir(parents=True)
+        (trajectory / "trajectory.json").write_text(json.dumps({"attempt": index}))
+        trials.append(
+            {
+                "task_name": "task-1",
+                "trial_name": name,
+                "verifier_result": {"rewards": {"reward": reward}},
+                "agent_result": {"cost_usd": 0.1 * index},
+            }
+        )
+    (job / "result.json").write_text(json.dumps({"trial_results": trials}))
+    run = _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model", 2)
+    assert run.runs[0].reward == 0.5
+    assert run.runs[0].trajectory == [{"attempt": 1}, {"attempt": 2}]
+    assert run.runs[0].cost_usd == pytest.approx(0.3)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model", 3)
 
 
 def test_terminal_split_manifest_and_both_dataset_classes(tmp_path):

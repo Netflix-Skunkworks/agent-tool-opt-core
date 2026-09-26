@@ -101,4 +101,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before ope
 
 ## License
 
-License selection and approval are pending. Do not publish a release until an approved `LICENSE` file is added.
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for copyright attribution.

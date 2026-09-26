@@ -506,3 +506,12 @@ def test_console_scripts_point_to_public_adapter_entrypoints():
     for target in scripts.values():
         module, function = target.split(":", 1)
         assert callable(getattr(importlib.import_module(module), function))
+
+
+def test_project_declares_apache_license_and_notice():
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    assert project["license"] == "Apache-2.0"
+    assert project["license-files"] == ["LICENSE", "NOTICE"]
+    assert "Apache License" in (root / "LICENSE").read_text()
+    assert "Copyright 2026 Netflix, Inc." in (root / "NOTICE").read_text()

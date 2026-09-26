@@ -117,6 +117,27 @@ def _load_reused_baseline(
 ) -> dict[str, RunResult]:
     source = source.expanduser().resolve(strict=True)
     summary = json.loads((source / "summary.json").read_text(encoding="utf-8"))
+    artifacts = {
+        split: json.loads(
+            (source / f"baseline_{split}.json").read_text(encoding="utf-8")
+        )
+        for split in ("train", "test")
+    }
+    return _decode_reused_baseline(
+        summary, artifacts, benchmark, agent, setup, train, test
+    )
+
+
+def _decode_reused_baseline(
+    summary: object,
+    artifacts: dict[str, object],
+    benchmark: Benchmark,
+    agent: Agent,
+    setup: dict,
+    train: list[str],
+    test: list[str],
+) -> dict[str, RunResult]:
+    """Validate and restore paired baselines from local files or Metaflow data."""
     expected = {
         "benchmark": benchmark.name,
         "agent": agent.id,
@@ -132,9 +153,7 @@ def _load_reused_baseline(
         )
     loaded = {}
     for split, tasks in (("train", train), ("test", test)):
-        artifact = json.loads(
-            (source / f"baseline_{split}.json").read_text(encoding="utf-8")
-        )
+        artifact = artifacts.get(split)
         if (
             not isinstance(artifact, dict)
             or artifact.get("benchmark") != benchmark.name

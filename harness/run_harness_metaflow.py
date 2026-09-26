@@ -1,8 +1,10 @@
-"""Local, provider-neutral Metaflow harness for TauBench tool optimization.
+"""Backend-neutral Metaflow harness for TauBench tool optimization.
 
-This ports the phase graph of the Netflix harness to upstream Metaflow without
-Titus, NCP, Metatron, or remote environment decorators. The synthetic mode is
-for a no-key CI smoke; ``--benchmark tau2`` uses the real upstream adapter.
+The five-phase graph uses upstream Metaflow without backend-specific decorators.
+Local file output remains available; ``--artifact-only`` uses Metaflow's
+datastore across remote workers.
+The synthetic mode is for a no-key CI smoke; ``--benchmark tau2`` uses the real
+upstream adapter.
 
 Examples:
     python harness/run_harness_metaflow.py show
@@ -11,24 +13,31 @@ Examples:
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import tempfile
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 
-from metaflow import FlowSpec, Parameter, step
+from metaflow import FlowSpec, IncludeFile, Parameter, Run, step
 
 from agent_tool_opt_core.adapters.run_phases import (
     _comparison,
     _cost,
+    _decode_reused_baseline,
     _load_reused_baseline,
     _phase,
     _phase_metrics,
+    _render_report,
     _save_candidate,
     _save_summary,
     _toolset_digest,
     _write_json,
 )
 from agent_tool_opt_core.adapters.tau2 import Tau2Agent, Tau2Benchmark, Tau2ToolTarget
-from agent_tool_opt_core.adapters.terminal import load_splits
+from agent_tool_opt_core.adapters.terminal import parse_splits
 from agent_tool_opt_core.api import (
     Agent,
     Benchmark,
@@ -47,6 +56,55 @@ from agent_tool_opt_core.driver import (
     propose,
 )
 from agent_tool_opt_core.optimizers.catalog import build_optimizer
+
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_OPTIMIZER_FILES = (
+    "attempts.jsonl",
+    "decision.txt",
+    "diff.patch",
+    "events.jsonl",
+    "metrics.json",
+    "proposal.json",
+    "session_attempts.jsonl",
+    "stderr.txt",
+)
+_MAX_OPTIMIZER_ARTIFACT_BYTES = 10_000_000
+_PI_ENV_KEYS = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "PI_OFFLINE",
+)
+
+
+def _optimizer_artifacts(scratch: Path) -> tuple[dict[str, str], list[str]]:
+    """Keep bounded optimizer evidence when scratch is worker-local."""
+    artifacts = {}
+    omitted = []
+    root = scratch.resolve()
+    for name in _OPTIMIZER_FILES:
+        path = scratch / "artifacts" / name
+        try:
+            if not path.is_file():
+                continue
+            if (
+                not path.resolve().is_relative_to(root)
+                or path.stat().st_size > _MAX_OPTIMIZER_ARTIFACT_BYTES
+            ):
+                omitted.append(name)
+                continue
+            artifacts[name] = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            omitted.append(name)
+    return artifacts, omitted
 
 
 class _SyntheticAgent(Agent):
@@ -115,7 +173,9 @@ class ToolOptimizationHarness(FlowSpec):
 
     benchmark = Parameter("benchmark", default="tau2", help="tau2|synthetic")
     domain = Parameter("domain", default="airline")
-    split = Parameter("split", default="", help="Frozen train/test JSON manifest")
+    split = IncludeFile(
+        "split", default=None, is_text=True, help="Frozen train/test JSON manifest"
+    )
     agent_model = Parameter("agent-model", default="")
     user_model = Parameter("user-model", default="")
     optimizer = Parameter("optimizer", default="pi")
@@ -126,11 +186,24 @@ class ToolOptimizationHarness(FlowSpec):
     num_trials = Parameter("num-trials", default=1, type=int)
     num_candidates = Parameter("num-candidates", default=1, type=int)
     max_steps = Parameter("max-steps", default=30, type=int)
-    baseline_dir = Parameter("baseline-dir", default="")
+    baseline_dir = Parameter(
+        "baseline-dir", default="", help="Reuse local baseline files"
+    )
+    baseline_run_id = Parameter(
+        "baseline-run-id", default="", help="Reuse a completed Metaflow baseline run"
+    )
+    artifact_only = Parameter(
+        "artifact-only",
+        default=False,
+        is_flag=True,
+        help="Persist outputs in Metaflow instead of a shared local directory",
+    )
     skip_optimize = Parameter("skip-optimize", default=False, is_flag=True)
     no_transcripts = Parameter("no-transcripts", default=False, is_flag=True)
     no_validation = Parameter("no-validation", default=False, is_flag=True)
-    output_dir = Parameter("output-dir", required=True)
+    output_dir = Parameter(
+        "output-dir", default="", help="New local output directory (file mode only)"
+    )
 
     def _components(self) -> tuple[Benchmark, Agent, ToolTarget]:
         if self.benchmark == "synthetic":
@@ -148,7 +221,7 @@ class ToolOptimizationHarness(FlowSpec):
         )
         return benchmark, agent, target
 
-    def _optimizer(self) -> Optimizer:
+    def _optimizer(self, scratch_root: Path) -> Optimizer:
         if self.benchmark == "synthetic":
             return _SyntheticOptimizer()
         kwargs = {
@@ -158,6 +231,17 @@ class ToolOptimizationHarness(FlowSpec):
         }
         if self.optimizer == "pi" and self.pi_provider:
             kwargs["provider"] = self.pi_provider
+        if self.artifact_only and self.optimizer == "pi":
+            home = scratch_root / ".pi-home"
+            home.mkdir()
+            kwargs["env"] = {
+                **{
+                    name: os.environ[name]
+                    for name in _PI_ENV_KEYS
+                    if name in os.environ
+                },
+                "HOME": str(home),
+            }
         return build_optimizer(
             self.optimizer,
             methods=[part.strip() for part in self.methods.split(",") if part.strip()],
@@ -166,6 +250,30 @@ class ToolOptimizationHarness(FlowSpec):
 
     def _baseline(self, split: str) -> RunResult:
         benchmark, agent, target = self._components()
+        if self.baseline_run_id:
+            source = Run(f"ToolOptimizationHarness/{self.baseline_run_id}")
+            if not source.successful:
+                raise ValueError("reused Metaflow baseline run did not complete")
+            try:
+                summary = source.data.summary
+                artifacts = {
+                    "train": source.data.train_phase,
+                    "test": source.data.test_phase,
+                }
+            except AttributeError:
+                raise ValueError(
+                    "reused Metaflow run is missing baseline artifacts"
+                ) from None
+            reused = _decode_reused_baseline(
+                summary,
+                artifacts,
+                benchmark,
+                agent,
+                self.setup,
+                self.train_tasks,
+                self.test_tasks,
+            )
+            return reused[split]
         if self.baseline_dir:
             reused = _load_reused_baseline(
                 Path(self.baseline_dir),
@@ -187,6 +295,14 @@ class ToolOptimizationHarness(FlowSpec):
             raise ValueError("scope must be descriptions or full")
         if self.num_candidates < 1 or self.num_trials < 1:
             raise ValueError("candidate and trial counts must be positive")
+        if self.baseline_dir and self.baseline_run_id:
+            raise ValueError("choose one baseline source")
+        if self.baseline_run_id and not _RUN_ID.fullmatch(self.baseline_run_id):
+            raise ValueError("invalid baseline run ID")
+        if self.artifact_only and (self.output_dir or self.baseline_dir):
+            raise ValueError("artifact-only mode uses run IDs, not local directories")
+        if not self.artifact_only and not self.output_dir:
+            raise ValueError("local output requires --output-dir")
         if self.benchmark == "synthetic":
             self.train_tasks, self.test_tasks = ["train-1"], ["test-1"]
         else:
@@ -196,7 +312,7 @@ class ToolOptimizationHarness(FlowSpec):
                 )
             if not self.skip_optimize and not self.optimizer_model:
                 raise ValueError("optimization needs --optimizer-model")
-            self.train_tasks, self.test_tasks = load_splits(Path(self.split))
+            self.train_tasks, self.test_tasks = parse_splits(json.loads(self.split))
         benchmark, agent, target = self._components()
         tools = target.extract()
         self.setup = {
@@ -208,10 +324,12 @@ class ToolOptimizationHarness(FlowSpec):
             "n_concurrent": getattr(benchmark, "n_concurrent", None),
             "parallel_phases": False,
         }
-        path = Path(self.output_dir).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.mkdir(exist_ok=False)
-        self.run_dir = str(path)
+        self.run_dir = ""
+        if not self.artifact_only:
+            path = Path(self.output_dir).expanduser().resolve()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.mkdir(exist_ok=False)
+            self.run_dir = str(path)
         self.next(self.baseline_train)
 
     @step
@@ -219,7 +337,8 @@ class ToolOptimizationHarness(FlowSpec):
         benchmark, _, _ = self._components()
         self.train_run = self._baseline("train")
         self.train_phase = _phase(benchmark, self.train_run)
-        _write_json(Path(self.run_dir) / "baseline_train.json", self.train_phase)
+        if not self.artifact_only:
+            _write_json(Path(self.run_dir) / "baseline_train.json", self.train_phase)
         self.next(self.baseline_test)
 
     @step
@@ -234,76 +353,94 @@ class ToolOptimizationHarness(FlowSpec):
     def optimize(self) -> None:
         self.records: list[dict] = []
         self.candidates: list[Candidate | None] = []
+        self.optimizer_artifacts: dict[int, dict[str, str]] = {}
+        self.optimized_artifacts: dict[int, dict[str, dict]] = {}
         self.optimizer_id = None
-        root = Path(self.run_dir)
-        if not self.skip_optimize:
-            benchmark, agent, target = self._components()
-            optimizer = self._optimizer()
-            self.optimizer_id = optimizer.id
-            train_eval = (
-                make_train_evaluator(benchmark, agent, target, self.train_tasks)
-                if optimizer.wants_train_eval
-                else None
-            )
-            original = target.extract()
-            for index in range(self.num_candidates):
-                candidate_root = (
-                    root
-                    if self.num_candidates == 1
-                    else root / f"candidate_{index:02d}"
+        scratch = (
+            tempfile.TemporaryDirectory(prefix="ato-metaflow-opt-")
+            if self.artifact_only
+            else nullcontext(self.run_dir)
+        )
+        with scratch as root_name:
+            root = Path(root_name)
+            if not self.skip_optimize:
+                benchmark, agent, target = self._components()
+                optimizer = self._optimizer(root)
+                self.optimizer_id = optimizer.id
+                train_eval = (
+                    make_train_evaluator(benchmark, agent, target, self.train_tasks)
+                    if optimizer.wants_train_eval
+                    else None
                 )
-                if self.num_candidates > 1:
-                    candidate_root.mkdir()
-                record: dict = {"index": index, "phases": {}}
-                self.records.append(record)
-                try:
-                    with collect_optimizer_costs() as costs:
-                        candidate = propose(
-                            optimizer,
-                            target,
-                            self.train_run,
-                            candidate_root / "optimize",
-                            train_eval,
-                        )
-                except Exception as exc:
+                original = target.extract()
+                for index in range(self.num_candidates):
+                    candidate_root = (
+                        root
+                        if self.num_candidates == 1
+                        else root / f"candidate_{index:02d}"
+                    )
+                    if self.num_candidates > 1:
+                        candidate_root.mkdir()
+                    record: dict = {"index": index, "phases": {}}
+                    self.records.append(record)
+                    try:
+                        with collect_optimizer_costs() as costs:
+                            candidate = propose(
+                                optimizer,
+                                target,
+                                self.train_run,
+                                candidate_root / "optimize",
+                                train_eval,
+                            )
+                    except Exception as exc:
+                        record["optimizer_cost"] = {
+                            "llm": _cost(costs.llm),
+                            "train_search": _cost(costs.search),
+                        }
+                        record["optimization"] = {
+                            "status": "optimizer_failed",
+                            "error_type": type(exc).__name__,
+                        }
+                        self.candidates.append(None)
+                        continue
+                    finally:
+                        if self.artifact_only:
+                            stored, omitted = _optimizer_artifacts(
+                                candidate_root / "optimize"
+                            )
+                            self.optimizer_artifacts[index] = stored
+                            if omitted:
+                                record["optimizer_artifacts_omitted"] = omitted
                     record["optimizer_cost"] = {
                         "llm": _cost(costs.llm),
                         "train_search": _cost(costs.search),
                     }
-                    record["optimization"] = {
-                        "status": "optimizer_failed",
-                        "error_type": type(exc).__name__,
+                    validation = target.validator().validate(candidate)
+                    changed = {
+                        name: text
+                        for name, text in candidate.files.items()
+                        if original.files.get(name) != text
                     }
-                    self.candidates.append(None)
-                    continue
-                record["optimizer_cost"] = {
-                    "llm": _cost(costs.llm),
-                    "train_search": _cost(costs.search),
-                }
-                validation = target.validator().validate(candidate)
-                changed = {
-                    name: text
-                    for name, text in candidate.files.items()
-                    if original.files.get(name) != text
-                }
-                if not validation.ok or not changed:
+                    if not validation.ok or not changed:
+                        record["optimization"] = {
+                            "status": "invalid_candidate"
+                            if not validation.ok
+                            else "no_edit",
+                            "validation": validation.log,
+                        }
+                        self.candidates.append(None)
+                        continue
+                    candidate = Candidate(changed)
+                    if not self.artifact_only:
+                        _save_candidate(candidate_root, candidate, original.allowlist)
                     record["optimization"] = {
-                        "status": "invalid_candidate"
-                        if not validation.ok
-                        else "no_edit",
+                        "status": "candidate_applied",
+                        "changed_files": sorted(changed),
                         "validation": validation.log,
                     }
-                    self.candidates.append(None)
-                    continue
-                candidate = Candidate(changed)
-                _save_candidate(candidate_root, candidate, original.allowlist)
-                record["optimization"] = {
-                    "status": "candidate_applied",
-                    "changed_files": sorted(changed),
-                    "validation": validation.log,
-                }
-                self.candidates.append(candidate)
-        _write_json(root / "baseline_test.json", self.test_phase)
+                    self.candidates.append(candidate)
+        if not self.artifact_only:
+            _write_json(Path(self.run_dir) / "baseline_test.json", self.test_phase)
         self.next(self.optimized_train)
 
     def _evaluate_candidates(self, split: str) -> None:
@@ -330,12 +467,16 @@ class ToolOptimizationHarness(FlowSpec):
             phase_name = f"optimized_{split}"
             artifact = _phase(benchmark, run)
             record["phases"][phase_name] = _phase_metrics(artifact)
-            candidate_root = (
-                Path(self.run_dir)
-                if self.num_candidates == 1
-                else Path(self.run_dir) / f"candidate_{record['index']:02d}"
+            self.optimized_artifacts.setdefault(record["index"], {})[phase_name] = (
+                artifact
             )
-            _write_json(candidate_root / f"{phase_name}.json", artifact)
+            if not self.artifact_only:
+                candidate_root = (
+                    Path(self.run_dir)
+                    if self.num_candidates == 1
+                    else Path(self.run_dir) / f"candidate_{record['index']:02d}"
+                )
+                _write_json(candidate_root / f"{phase_name}.json", artifact)
 
     @step
     def optimized_train(self) -> None:
@@ -365,6 +506,10 @@ class ToolOptimizationHarness(FlowSpec):
         if self.baseline_dir:
             self.summary["baseline_source"] = str(
                 Path(self.baseline_dir).expanduser().resolve()
+            )
+        if self.baseline_run_id:
+            self.summary["baseline_source"] = (
+                f"ToolOptimizationHarness/{self.baseline_run_id}"
             )
         if self.skip_optimize:
             self.summary["optimization"] = {"status": "baseline_only"}
@@ -404,8 +549,10 @@ class ToolOptimizationHarness(FlowSpec):
                 "requested": self.num_candidates,
                 "completed": completed,
             }
-        _save_summary(Path(self.run_dir), self.summary)
-        print(f"Metaflow local optimization: {self.summary['optimization']['status']}")
+        self.report_html = _render_report(self.summary)
+        if not self.artifact_only:
+            _save_summary(Path(self.run_dir), self.summary)
+        print(f"Metaflow optimization: {self.summary['optimization']['status']}")
 
 
 if __name__ == "__main__":

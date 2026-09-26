@@ -175,7 +175,7 @@ class Tau2DescriptionValidator(Validator):
             source = splice_docstrings(
                 self.baseline_source, parse_descriptions(markdown, names)
             )
-            compile(source, "tools.py", "exec")
+            compile(source, "tools.py", "exec", dont_inherit=True)
         except (SyntaxError, ValueError) as exc:
             return ValidationResult(False, f"invalid tool descriptions: {exc}")
         return _schema_import_check(source, self.baseline_source)
@@ -198,7 +198,7 @@ class Tau2CodeValidator(Validator):
                 self.baseline_source, self.class_name
             ):
                 return ValidationResult(False, "@is_tool contracts changed")
-            compile(source, "tools.py", "exec")
+            compile(source, "tools.py", "exec", dont_inherit=True)
         except (SyntaxError, ValueError) as exc:
             return ValidationResult(False, f"invalid Python source: {exc}")
         return _schema_import_check(source)
@@ -287,7 +287,10 @@ class Tau2ToolTarget(ToolTarget):
         module.__package__ = f"tau2.domains.{self.domain}"
         sys.modules[self._candidate_module_name] = module
         try:
-            exec(compile(source, self._candidate_module_name, "exec"), module.__dict__)
+            exec(
+                compile(source, self._candidate_module_name, "exec", dont_inherit=True),
+                module.__dict__,
+            )
             candidate_class = getattr(module, self._class_name)
         except BaseException:
             sys.modules.pop(self._candidate_module_name, None)

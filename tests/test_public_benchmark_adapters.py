@@ -151,6 +151,7 @@ def test_tau2_tool_target_swaps_and_restores_class(monkeypatch, tmp_path):
     )
     target.apply(Candidate({"descriptions.md": edited}))
     assert environment.AirlineTools is not original
+    assert environment.AirlineTools.lookup.__annotations__["reservation_id"] is str
     assert environment.AirlineTools().lookup("ABC") == "ABC"
     assert "Use the exact ID" in target.effective_toolset().files["descriptions.md"]
     target.restore()
@@ -297,6 +298,7 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
 
     def fake_run(args, **kwargs):
         assert kwargs["check"] is False
+        assert args[:4] == [sys.executable, "-m", "harbor.cli.main", "run"]
         task = args[args.index("--include-task-name") + 1]
         job_dir = (
             Path(args[args.index("--jobs-dir") + 1])
@@ -357,6 +359,39 @@ def test_harbor_baseline_and_candidate_use_same_task_and_overlay(monkeypatch, tm
     assert target.effective_toolset() == target.extract()
 
 
+def test_harbor_failure_reports_type_without_stderr_secrets(monkeypatch, tmp_path):
+    source = _opencode_checkout(tmp_path)
+    bundle = _source_bundle(source, tmp_path / "source.tar")
+    tasks = tmp_path / "tasks"
+    for name in ("a", "b"):
+        (tasks / name).mkdir(parents=True)
+        (tasks / name / "task.toml").write_text("")
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"train": ["a"], "test": ["b"]}))
+    bun = tmp_path / "bun"
+    bun.write_bytes(b"binary")
+    benchmark = TerminalBench2(
+        benchmark_checkout=tasks,
+        opencode_checkout=source,
+        split_manifest=split,
+        source_bundle=bundle,
+        bun_linux_binary=bun,
+        jobs_dir=tmp_path / "jobs",
+    )
+    monkeypatch.setattr(
+        "agent_tool_opt_core.adapters.terminal.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stderr="AuthenticationError: api_key=secret123"
+        ),
+    )
+    with pytest.raises(RuntimeError) as error:
+        benchmark.evaluate(
+            OpenCodeAgent("provider/model"), ["a"], OpenCodeToolTarget(source).extract()
+        )
+    assert "AuthenticationError" in str(error.value)
+    assert "secret123" not in str(error.value)
+
+
 def test_harbor_missing_reward_is_not_scored_as_zero(tmp_path):
     job = tmp_path / "job"
     job.mkdir()
@@ -377,22 +412,58 @@ def test_harbor_missing_reward_is_not_scored_as_zero(tmp_path):
         _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model")
 
 
+def test_harbor_trial_error_reports_only_safe_type(tmp_path):
+    job = tmp_path / "job"
+    trial = job / "trial-1"
+    trial.mkdir(parents=True)
+    (job / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": 1,
+                "finished_at": "2026-09-25T20:00:00Z",
+                "stats": {"n_completed_trials": 1, "n_errored_trials": 1},
+            }
+        )
+    )
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "task-1",
+                "trial_name": "trial-1",
+                "exception_info": {
+                    "exception_type": "AgentAuthenticationError",
+                    "exception_message": "api_key=secret123",
+                },
+            }
+        )
+    )
+    with pytest.raises(RuntimeError) as error:
+        _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model")
+    assert "AgentAuthenticationError" in str(error.value)
+    assert "secret123" not in str(error.value)
+
+
 def test_harbor_restores_instruction_from_trial_result(tmp_path):
     job = tmp_path / "job"
     trial = job / "trial-1"
     (trial / "agent").mkdir(parents=True)
     (trial / "agent" / "trajectory.json").write_text('{"steps": []}')
-    (trial / "result.json").write_text('{"instruction": "Fix the build"}')
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "task-1",
+                "trial_name": "trial-1",
+                "instruction": "Fix the build",
+                "verifier_result": {"rewards": {"reward": 0}},
+            }
+        )
+    )
     (job / "result.json").write_text(
         json.dumps(
             {
-                "trial_results": [
-                    {
-                        "task_name": "task-1",
-                        "trial_name": "trial-1",
-                        "verifier_result": {"rewards": {"reward": 0}},
-                    }
-                ]
+                "n_total_trials": 1,
+                "finished_at": "2026-09-25T20:00:00Z",
+                "stats": {"n_completed_trials": 1, "n_errored_trials": 0},
             }
         )
     )
@@ -492,3 +563,30 @@ def test_opencode_bundle_rejects_escaping_member(tmp_path):
         archive.addfile(info, io.BytesIO(payload))
     with pytest.raises(ValueError, match="unsafe"):
         check_bundle(bundle)
+
+
+def test_opencode_bundle_accepts_in_tree_workspace_links(tmp_path):
+    checkout = _opencode_checkout(tmp_path)
+    bundle = _source_bundle(checkout, tmp_path / "source.tar")
+    with tarfile.open(bundle, "a") as archive:
+        first = tarfile.TarInfo("node_modules/alias")
+        first.type = tarfile.SYMTYPE
+        first.linkname = "dependency.txt"
+        archive.addfile(first)
+        second = tarfile.TarInfo("node_modules/.bin/command")
+        second.type = tarfile.SYMTYPE
+        second.linkname = "../alias"
+        archive.addfile(second)
+    check_bundle(bundle, checkout)
+
+
+def test_opencode_bundle_rejects_escaping_workspace_link(tmp_path):
+    checkout = _opencode_checkout(tmp_path)
+    bundle = _source_bundle(checkout, tmp_path / "source.tar")
+    with tarfile.open(bundle, "a") as archive:
+        link = tarfile.TarInfo("node_modules/escape")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../outside"
+        archive.addfile(link)
+    with pytest.raises(ValueError, match="escaping"):
+        check_bundle(bundle, checkout)

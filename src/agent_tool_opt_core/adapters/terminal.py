@@ -14,6 +14,7 @@ import math
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -220,13 +221,28 @@ def _harbor_results(
     agent: str,
     num_trials: int = 1,
 ) -> RunResult:
-    data = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
-    trials = data.get("trial_results")
-    if not isinstance(trials, list) or len(trials) != len(task_names) * num_trials:
+    job = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+    expected = len(task_names) * num_trials
+    if not isinstance(job, dict) or job.get("n_total_trials", expected) != expected:
+        raise RuntimeError("Harbor job has an unexpected trial count")
+    stats = job.get("stats") or {}
+    if "finished_at" in job and job["finished_at"] is None:
+        raise RuntimeError("Harbor job did not finish")
+
+    trials = job.get("trial_results")
+    if not isinstance(trials, list):
+        trials = []
+        for path in sorted(job_dir.glob("*/result.json")):
+            if not path.resolve().is_relative_to(job_dir.resolve()):
+                raise RuntimeError("Harbor trial path escapes its job directory")
+            trials.append(json.loads(path.read_text(encoding="utf-8")))
+    if len(trials) != expected:
         raise RuntimeError("Harbor returned incomplete trial results")
     grouped: dict[str, list[TaskRun]] = {name: [] for name in task_names}
     seen_trials: set[str] = set()
     for trial in trials:
+        if not isinstance(trial, dict):
+            raise RuntimeError("Harbor trial result is malformed")
         name = trial.get("task_name")
         trial_name = trial.get("trial_name")
         if (
@@ -237,6 +253,12 @@ def _harbor_results(
             raise RuntimeError("Harbor returned an unexpected or duplicate trial")
         seen_trials.add(trial_name)
         if trial.get("exception_info"):
+            info = trial["exception_info"]
+            kind = info.get("exception_type") if isinstance(info, dict) else None
+            if isinstance(kind, str) and re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]{0,80}", kind
+            ):
+                raise RuntimeError(f"Harbor trial failed for {name}: {kind}")
             raise RuntimeError(f"Harbor trial failed for {name}")
         verifier = trial.get("verifier_result") or {}
         rewards = verifier.get("rewards") or {}
@@ -282,6 +304,11 @@ def _harbor_results(
                 known_cost_usd=float(cost) if cost is not None else 0.0,
             )
         )
+    if not isinstance(stats, dict) or (
+        stats.get("n_errored_trials", 0) != 0
+        or stats.get("n_completed_trials", expected) != expected
+    ):
+        raise RuntimeError("Harbor job has incomplete or errored trials")
     runs = []
     for name in task_names:
         attempts = grouped[name]
@@ -405,7 +432,9 @@ class HarborBenchmark(Benchmark):
                 destination.write_text(content, encoding="utf-8")
             job_name = f"ato-{uuid.uuid4().hex}"
             args = [
-                "harbor",
+                sys.executable,
+                "-m",
+                "harbor.cli.main",
                 "run",
                 "--path",
                 str(self.benchmark_checkout),
@@ -433,13 +462,20 @@ class HarborBenchmark(Benchmark):
             result = subprocess.run(
                 args,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
                 check=False,
                 timeout=self.timeout_seconds,
             )
             if result.returncode != 0:
+                error_types = re.findall(
+                    r"\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b",
+                    result.stderr or "",
+                )
+                error_type = error_types[-1] if error_types else "unknown error"
                 raise RuntimeError(
-                    f"Harbor job failed (exit {result.returncode}); inspect the local job logs"
+                    f"Harbor job failed (exit {result.returncode}, {error_type}); "
+                    f"inspect the local job directory {self.jobs_dir / job_name}"
                 )
             return _harbor_results(
                 self.jobs_dir / job_name, tasks, self.name, agent.id, self.num_trials

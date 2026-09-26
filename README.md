@@ -25,6 +25,10 @@ python -m pip install -e .
 
 The `metaflow` extra installs upstream Metaflow. The public orchestration harness is still being migrated.
 
+## Benchmark source checkouts
+
+To optimize tools against TauBench Verified, TerminalBench 2, or OpenThoughts TBLite, clone the public benchmark repositories locally. TerminalBench and TBLite use OpenCode as the agent whose tool definitions are optimized. See [benchmark setup](docs/benchmarks.md) for the upstream URLs, installation steps, and the difference between the benchmark datasets and the agent source.
+
 ## LLM configuration
 
 The default client delegates provider routing and authentication to [LiteLLM](https://docs.litellm.ai/). Configure providers using LiteLLM's supported configuration mechanisms and use provider-qualified model names. This project does not load environment files, manage API keys, or define project IDs.

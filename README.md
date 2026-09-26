@@ -25,6 +25,16 @@ python -m pip install -e .
 
 The `metaflow` extra installs upstream Metaflow. The public orchestration harness is still being migrated.
 
+To smoke-test the public phase runner under Metaflow's local backend without a model key or Titus:
+
+```bash
+python -m pip install -e ".[metaflow]"
+python examples/metaflow_local_smoke.py show
+python examples/metaflow_local_smoke.py run --output-dir runs/metaflow-smoke
+```
+
+This synthetic example verifies local Metaflow execution and persisted phase artifacts; it is not the full benchmark Metaflow harness.
+
 ## Benchmark source checkouts
 
 The benchmark datasets and agent code are not bundled with this package. To run tool optimization against TauBench Verified, TerminalBench 2, or OpenThoughts TBLite, clone their public repositories next to `agent-tool-opt-core`:

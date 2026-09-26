@@ -5,6 +5,7 @@ __pycache__/
 .pdm-build/
 .coverage
 .pytest_cache/
+.metaflow/
 .ruff_cache/
 .tox/
 .venv/
@@ -12,5 +13,6 @@ uv.lock
 build/
 dist/
 htmlcov/
+runs/
 .env
 .env.*

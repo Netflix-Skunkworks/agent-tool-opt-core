@@ -47,14 +47,14 @@ Both tool targets default to description-only optimization. TauBench presents `d
 The public runners keep the original five phases: baseline train, baseline test, optimize on train transcripts only, optimized train, and optimized test. With frozen split JSON files and real model names, invoke them as follows:
 
 ```bash
-python -m agent_tool_opt_core.adapters.run_tau2 \
+ato-tau2 \
   --domain airline --split splits/airline.json \
   --agent-model agent-model --user-model user-simulator-model \
   --optimizer pi --optimizer-model optimizer-model \
   --methods reward_shaping,generalization --num-trials 3 \
   --out runs/airline-001
 
-python -m agent_tool_opt_core.adapters.run_terminal \
+ato-terminal \
   --benchmark tb2 --benchmark-checkout ../terminal-bench-2 \
   --opencode-checkout ../opencode --split splits/tb2.json \
   --source-bundle ../opencode-source-linux.tar \
@@ -67,6 +67,8 @@ python -m agent_tool_opt_core.adapters.run_terminal \
 ```
 
 For TBLite, use `--benchmark tblite` and `--benchmark-checkout ../OpenThoughts-TBLite`. Substitute configured model IDs, provider credentials, and actual task IDs; `--out` must name a new directory. Terminal `--n-concurrent` is the total task concurrency budget; with `--parallel-phases`, each of the two simultaneous jobs receives at most half (minimum total: two). TauBench phases remain sequential because its tool-class swap is process-global.
+
+The `ato-tau2` and `ato-terminal` commands are installed with this package. Equivalent module invocations are `python -m agent_tool_opt_core.adapters.run_tau2` and `python -m agent_tool_opt_core.adapters.run_terminal`.
 
 To capture a baseline once and reuse it for several optimization attempts, run either CLI with `--baseline-only --out runs/baseline-001` (no `--optimizer-model` required). Later pass `--baseline-dir runs/baseline-001 --num-candidates 3 --out runs/candidates-001` with the same benchmark, agent, split and trial count. Reuse checks these fields and the editable tool/context snapshot before any new run. Each candidate is proposed independently from the original training baseline; candidate outputs are saved under `candidate_00/`, `candidate_01/`, and so on. Pin benchmark checkout commits too: local uncommitted task changes are not captured by the reuse check.
 

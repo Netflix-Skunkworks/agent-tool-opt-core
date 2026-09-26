@@ -51,13 +51,13 @@ python -m pip install -e ../harbor
 The terminal adapter also needs the Linux OpenCode source bundle described in [benchmark setup](docs/benchmarks.md). Replace the model names and paths below with your own:
 
 ```bash
-python -m agent_tool_opt_core.adapters.run_tau2 \
+ato-tau2 \
   --domain airline --split splits/airline.json \
   --agent-model provider/agent-model --user-model provider/user-model \
   --optimizer pi --optimizer-model provider/optimizer-model \
   --methods reward_shaping,generalization --out runs/airline-001
 
-python -m agent_tool_opt_core.adapters.run_terminal \
+ato-terminal \
   --benchmark tb2 --benchmark-checkout ../terminal-bench-2 \
   --opencode-checkout ../opencode --split splits/tb2.json \
   --source-bundle ../opencode-source-linux.tar \
@@ -67,6 +67,8 @@ python -m agent_tool_opt_core.adapters.run_terminal \
 ```
 
 For TBLite, switch to `--benchmark tblite --benchmark-checkout ../OpenThoughts-TBLite`. Use `--baseline-only` to create a reusable baseline, then `--baseline-dir <prior-run> --num-candidates 3` for several independent edits. Terminal runs can add `--parallel-phases --n-concurrent 4`. Each run writes phase JSON files, `summary.json`, and `report.html` under the new `--out` directory.
+
+These commands are installed by `python -m pip install -e .`. The module forms (`python -m agent_tool_opt_core.adapters.run_tau2` and `python -m agent_tool_opt_core.adapters.run_terminal`) remain available when a console script is not on `PATH`.
 
 ## LLM configuration
 

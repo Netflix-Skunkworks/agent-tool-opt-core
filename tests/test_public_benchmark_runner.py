@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import importlib
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -489,3 +492,17 @@ def test_public_runner_has_help_without_upstream_runtime(entrypoint, capsys):
         entrypoint(["--help"])
     assert exit_info.value.code == 0
     assert "--num-trials" in capsys.readouterr().out
+
+
+def test_console_scripts_point_to_public_adapter_entrypoints():
+    project = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )["project"]
+    scripts = project["scripts"]
+    assert scripts == {
+        "ato-tau2": "agent_tool_opt_core.adapters.run_tau2:main",
+        "ato-terminal": "agent_tool_opt_core.adapters.run_terminal:main",
+    }
+    for target in scripts.values():
+        module, function = target.split(":", 1)
+        assert callable(getattr(importlib.import_module(module), function))

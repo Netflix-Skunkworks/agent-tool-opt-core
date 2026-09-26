@@ -17,6 +17,10 @@ dependencies = [
     "toml==0.10.2",
 ]
 
+[project.scripts]
+ato-tau2 = "agent_tool_opt_core.adapters.run_tau2:main"
+ato-terminal = "agent_tool_opt_core.adapters.run_terminal:main"
+
 [project.optional-dependencies]
 metaflow = ["metaflow==2.19.36"]
 dev = [

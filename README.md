@@ -27,7 +27,17 @@ The `metaflow` extra installs upstream Metaflow. The public orchestration harnes
 
 ## Benchmark source checkouts
 
-To optimize tools against TauBench Verified, TerminalBench 2, or OpenThoughts TBLite, clone the public benchmark repositories locally. TerminalBench and TBLite use OpenCode as the agent whose tool definitions are optimized. See [benchmark setup](docs/benchmarks.md) for the upstream URLs, installation steps, and the difference between the benchmark datasets and the agent source.
+The benchmark datasets and agent code are not bundled with this package. To run tool optimization against TauBench Verified, TerminalBench 2, or OpenThoughts TBLite, clone their public repositories next to `agent-tool-opt-core`:
+
+```bash
+git clone https://github.com/amazon-agi/tau2-bench-verified.git ../tau2-bench-verified
+git clone https://github.com/laude-institute/terminal-bench-2.git ../terminal-bench-2
+git clone https://github.com/open-thoughts/OpenThoughts-TBLite.git ../OpenThoughts-TBLite
+git clone https://github.com/anomalyco/opencode.git ../opencode
+git clone https://github.com/laude-institute/harbor.git ../harbor
+```
+
+The TauBench adapter imports the local `tau2` package. The TerminalBench 2 and TBLite adapters run tasks from their local checkouts through Harbor, with OpenCode source and edited tool descriptions uploaded into each sandbox. See [benchmark setup](docs/benchmarks.md) for installation, frozen task splits, and example adapter construction. Terminal runs require a Linux OpenCode dependency bundle and Linux Bun executable; these are not shipped here. Live benchmark runs have not yet been verified in this public migration.
 
 ## LLM configuration
 

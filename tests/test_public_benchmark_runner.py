@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_tool_opt_core.adapters.run_phases import run_five_phases
+from agent_tool_opt_core.adapters.run_phases import (
+    _decode_reused_baseline,
+    run_five_phases,
+)
 from agent_tool_opt_core.adapters.run_tau2 import main as tau2_main
 from agent_tool_opt_core.adapters.run_terminal import main as terminal_main
 from agent_tool_opt_core.api import (
@@ -311,6 +314,47 @@ def test_baseline_only_can_be_reused_without_new_baseline_calls(tmp_path):
         (("test-1",), "edited"),
     ]
     assert reused["comparison"]["test"]["avg_reward_delta"] == 1.0
+
+
+def test_metaflow_baseline_artifacts_use_the_same_reuse_gate(tmp_path):
+    benchmark = ExampleBenchmark()
+    agent = ExampleAgent()
+    output = tmp_path / "baseline"
+    summary = run_five_phases(
+        benchmark,
+        agent,
+        ExampleTarget(),
+        None,
+        train=["train-1"],
+        test=["test-1"],
+        output_dir=output,
+    )
+    artifacts = {
+        split: json.loads((output / f"baseline_{split}.json").read_text())
+        for split in ("train", "test")
+    }
+    runs = _decode_reused_baseline(
+        summary,
+        artifacts,
+        benchmark,
+        agent,
+        summary["setup"],
+        ["train-1"],
+        ["test-1"],
+    )
+    assert runs["train"].split == "train"
+    assert runs["test"].runs[0].task_id == "test-1"
+    artifacts["test"]["runs"] = []
+    with pytest.raises(ValueError, match="incomplete"):
+        _decode_reused_baseline(
+            summary,
+            artifacts,
+            benchmark,
+            agent,
+            summary["setup"],
+            ["train-1"],
+            ["test-1"],
+        )
 
 
 def test_baseline_reuse_rejects_changed_tool_snapshot(tmp_path):

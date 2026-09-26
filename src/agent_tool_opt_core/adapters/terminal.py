@@ -194,7 +194,11 @@ class OpenCodeAgent(Agent):
 
 def load_splits(path: Path) -> tuple[list[str], list[str]]:
     """Read a frozen, explicit split manifest; never derive it from outcomes."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return parse_splits(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def parse_splits(data: object) -> tuple[list[str], list[str]]:
+    """Validate split IDs from a JSON manifest, including Metaflow IncludeFile."""
     if not isinstance(data, dict):
         raise ValueError("split manifest must be a JSON object")
     splits = []

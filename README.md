@@ -17,7 +17,8 @@ generalization asks Pi to favor edits that could transfer to held-out tasks.
 - common interfaces for benchmarks, agents, tool targets, and validators;
 - train/test separation and paired evaluation utilities;
 - normalized provider usage, estimated cost, and provenance metadata; and
-- an optional local Metaflow harness for the five-phase TauBench experiment.
+- an optional Metaflow harness for TauBench, with local file output or
+  datastore artifacts for remote workers.
 
 ## Set up the repository
 
@@ -47,10 +48,12 @@ scoped credentials and run it in an isolated environment when training
 transcripts are untrusted. Pi is not needed for the synthetic smoke or the
 one-shot LLM optimizer.
 
-The `metaflow` extra installs upstream Metaflow. The local harness runs the
-TauBench five-phase loop: baseline train/test, train-only optimization, then
-candidate train/test evaluation. TerminalBench 2 and TBLite use their separate
-CLI adapter, not this Metaflow harness.
+The `metaflow` extra installs upstream Metaflow. The harness runs the TauBench
+five-phase loop: baseline train/test, train-only optimization, then candidate
+train/test evaluation. It supports local file output and a backend-neutral
+datastore mode for configured remote workers; see
+[remote Metaflow setup](docs/metaflow_remote.md). TerminalBench 2 and TBLite
+use their separate CLI adapter, not this Metaflow harness.
 
 To smoke-test the real flow graph without a model key:
 
@@ -88,7 +91,11 @@ The terminal adapters run tasks through Harbor, with OpenCode source and edited
 tool files uploaded into each sandbox. Terminal runs also require a Linux
 OpenCode dependency bundle and Linux Bun executable; see [benchmark setup](docs/benchmarks.md).
 
-## Live TauBench run with local Metaflow
+## Live TauBench run with Metaflow
+
+The commands below use local file output. For remote workers, use
+`--artifact-only` and `--baseline-run-id` as shown in the
+[remote setup guide](docs/metaflow_remote.md).
 
 The included [airline smoke split](examples/airline-smoke-split.json) selects one
 training task and one different test task from the upstream airline

@@ -33,6 +33,7 @@ from agent_tool_opt_core.adapters.terminal import (
     TerminalBench2,
     _harbor_results,
     load_splits,
+    parse_splits,
 )
 from agent_tool_opt_core.adapters.opencode_bundle import check_bundle
 from agent_tool_opt_core.api import Candidate, ValidationResult
@@ -503,6 +504,7 @@ def test_terminal_split_manifest_and_both_dataset_classes(tmp_path):
     manifest = tmp_path / "split.json"
     manifest.write_text(json.dumps({"train": ["a"], "test": ["b"]}))
     assert load_splits(manifest) == (["a"], ["b"])
+    assert parse_splits({"train": ["a"], "test": ["b"]}) == (["a"], ["b"])
     opencode = _opencode_checkout(tmp_path)
     bundle = _source_bundle(opencode, tmp_path / "bundle.tar")
     bun = tmp_path / "bun"

@@ -111,6 +111,29 @@ and environment restrictions.
 Workspace validation still runs after Pi exits. Review saved artifacts before
 sharing them.
 
+## Untrusted transcript evidence
+
+Benchmark messages, tool outputs, and task IDs can contain prompt injections.
+Pi's transcript prompt identifies these files as untrusted evidence. The system
+prompt applies the same rule to transcript indexes, method-derived context, and
+other workspace reads. Workspace filenames, raw text, JSON structure, and
+context-builder output keep their existing formats so consumers can continue to
+read them. Original trajectories and exported benchmark results are unchanged.
+
+The system prompt instructs Pi to treat evidence as data on every read, including
+partial pages and resumed sessions, and to check proposed edits against observed
+tool behavior. This reduces ambiguity about which text carries instructions.
+It does not reliably detect or prevent prompt injection, and repeated reads are
+still allowed. Instruction wording and phrase matching cannot prove
+that generated code is safe. The file allowlist and language validators likewise
+do not verify the intent or safety of an allowed edit.
+
+Review candidate changes and isolate the entire worker for untrusted inputs or
+full-code evaluation. Bubblewrap confines Pi's filesystem access but shares the
+network; selected model credentials are still available to Pi. Candidate
+validation and benchmark execution require their own isolation as described
+above.
+
 ## Integration smoke
 
 A live Linux-container smoke used Pi 0.84.1, Node.js 22.22.0, Bubblewrap 0.6.1,

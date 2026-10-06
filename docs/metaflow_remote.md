@@ -24,6 +24,13 @@ sandbox: isolate the optimize worker and restrict its workload identity and
 mounted files. Raw task transcripts and optimizer events are persisted as
 Metaflow artifacts, so restrict datastore access and retention accordingly.
 
+For a Linux optimize worker, `--pi-sandbox bubblewrap` enables the optional
+[Pi filesystem sandbox](pi_sandbox.md). Select provider variables with
+`--pi-sandbox-env OPENAI_API_KEY` (comma-separated for multiple names).
+This mode uses its own minimal environment in both local and artifact-only
+runs. It confines Pi; candidate validation and evaluation still need the
+worker-level controls described above.
+
 ## Inputs and outputs
 
 `--split` names a JSON file on the submitting machine. Metaflow `IncludeFile`

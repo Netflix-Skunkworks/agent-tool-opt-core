@@ -56,6 +56,7 @@ from agent_tool_opt_core.driver import (
     propose,
 )
 from agent_tool_opt_core.optimizers.catalog import build_optimizer
+from agent_tool_opt_core.optimizers.pi_sandbox import pi_sandbox_kwargs
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _OPTIMIZER_FILES = (
@@ -181,6 +182,12 @@ class ToolOptimizationHarness(FlowSpec):
     optimizer = Parameter("optimizer", default="pi")
     optimizer_model = Parameter("optimizer-model", default="")
     pi_provider = Parameter("pi-provider", default="")
+    pi_sandbox = Parameter("pi-sandbox", default="none", help="none|bubblewrap")
+    pi_sandbox_env = Parameter(
+        "pi-sandbox-env",
+        default="",
+        help="Comma-separated provider environment variable names to forward to Pi",
+    )
     methods = Parameter("methods", default="reward_shaping,generalization")
     scope = Parameter("scope", default="descriptions")
     num_trials = Parameter("num-trials", default=1, type=int)
@@ -228,10 +235,20 @@ class ToolOptimizationHarness(FlowSpec):
             "model": self.optimizer_model,
             "use_transcripts": not self.no_transcripts,
             "require_validation": not self.no_validation,
+            **pi_sandbox_kwargs(
+                self.pi_sandbox,
+                tuple(
+                    name.strip()
+                    for name in self.pi_sandbox_env.split(",")
+                    if name.strip()
+                ),
+                optimizer=self.optimizer,
+                enabled=not self.skip_optimize,
+            ),
         }
         if self.optimizer == "pi" and self.pi_provider:
             kwargs["provider"] = self.pi_provider
-        if self.artifact_only and self.optimizer == "pi":
+        if self.artifact_only and self.optimizer == "pi" and self.pi_sandbox == "none":
             home = scratch_root / ".pi-home"
             home.mkdir()
             kwargs["env"] = {
@@ -289,6 +306,14 @@ class ToolOptimizationHarness(FlowSpec):
 
     @step
     def start(self) -> None:
+        pi_sandbox_kwargs(
+            self.pi_sandbox,
+            tuple(
+                name.strip() for name in self.pi_sandbox_env.split(",") if name.strip()
+            ),
+            optimizer=self.optimizer,
+            enabled=not self.skip_optimize and self.benchmark != "synthetic",
+        )
         if self.benchmark not in {"tau2", "synthetic"}:
             raise ValueError("benchmark must be tau2 or synthetic")
         if self.scope not in {"descriptions", "full"}:

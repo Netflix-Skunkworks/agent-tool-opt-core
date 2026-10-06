@@ -535,7 +535,78 @@ def test_public_runner_has_help_without_upstream_runtime(entrypoint, capsys):
     with pytest.raises(SystemExit) as exit_info:
         entrypoint(["--help"])
     assert exit_info.value.code == 0
-    assert "--num-trials" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    assert "--num-trials" in help_text
+    assert "--pi-sandbox" in help_text
+    assert "--pi-sandbox-env" in help_text
+
+
+@pytest.mark.parametrize("kind", ["tau2", "terminal"])
+def test_public_cli_forwards_pi_sandbox_options(kind, monkeypatch, tmp_path):
+    module = importlib.import_module(f"agent_tool_opt_core.adapters.run_{kind}")
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"train": ["train-1"], "test": ["test-1"]}))
+    seen = {}
+
+    def build(name, **kwargs):
+        seen.update(name=name, **kwargs)
+        return object()
+
+    monkeypatch.setattr(module, "build_optimizer", build)
+    monkeypatch.setattr(
+        module,
+        "run_five_phases",
+        lambda *args, **kwargs: {"optimization": {"status": "no_edit"}},
+    )
+    args = [
+        "--split",
+        str(split),
+        "--agent-model",
+        "agent",
+        "--optimizer-model",
+        "optimizer",
+        "--out",
+        str(tmp_path / "out"),
+        "--pi-sandbox",
+        "bubblewrap",
+        "--pi-sandbox-env",
+        "OPENAI_API_KEY",
+    ]
+    if kind == "tau2":
+        monkeypatch.setattr(
+            module, "Tau2Benchmark", lambda *args, **kwargs: ExampleBenchmark()
+        )
+        monkeypatch.setattr(
+            module, "Tau2ToolTarget", lambda *args, **kwargs: ExampleTarget()
+        )
+        args += ["--domain", "airline", "--user-model", "user"]
+    else:
+        monkeypatch.setattr(
+            module, "TerminalBench2", lambda **kwargs: ExampleBenchmark()
+        )
+        monkeypatch.setattr(
+            module, "OpenCodeToolTarget", lambda *args, **kwargs: ExampleTarget()
+        )
+        args += [
+            "--benchmark",
+            "tb2",
+            "--benchmark-checkout",
+            str(tmp_path),
+            "--opencode-checkout",
+            str(tmp_path),
+            "--source-bundle",
+            str(tmp_path / "source.tar"),
+            "--bun-linux-binary",
+            str(tmp_path / "bun"),
+            "--jobs-dir",
+            str(tmp_path / "jobs"),
+        ]
+    assert module.main(args) == 0
+    assert seen["sandbox"] == "bubblewrap"
+    assert seen["sandbox_env"] == ("OPENAI_API_KEY",)
+    with pytest.raises(SystemExit) as exit_info:
+        module.main([*args, "--optimizer", "llm"])
+    assert exit_info.value.code == 2
 
 
 def test_console_scripts_point_to_public_adapter_entrypoints():

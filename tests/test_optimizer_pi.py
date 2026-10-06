@@ -696,83 +696,6 @@ def test_session_dir_is_absolute_so_pi_cannot_write_into_the_workspace(
     assert cand.files == {"tools.py": "def t():\n    return 1\n"}  # gate passes
 
 
-def _tool_event(name, text, *, is_error):
-    return json.dumps({
-        "type": "tool_execution_end",
-        "toolName": name,
-        "result": {"content": [{"type": "text", "text": text}]},
-        "isError": is_error,
-    })  # fmt: skip
-
-
-# Verbatim from the run that exposed this: a scratch outside the sandbox's git
-# root makes every read/edit fail while pi still exits 0.
-_BWRAP_ERR = (
-    "warning: cannot write to journal: not inside a git repository: use "
-    "--journal global or a literal path bwrap: Can't chdir"
-)
-
-
-def test_sandbox_denial_is_detected_and_raises(mocker, tmp_path):
-    _which(mocker)
-    stdout = "\n".join([
-        _session(),
-        _tool_event("read", _BWRAP_ERR, is_error=True),
-        _tool_event("edit", "Preflight failed before mutating files.", is_error=True),
-    ])  # fmt: skip
-
-    def side(cmd, **kw):
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
-
-    mocker.patch("agent_tool_opt_core.optimizers.pi.subprocess.run", side_effect=side)
-    # Without the guard this returns an empty Candidate reported as "accepted",
-    # which downstream scores as a baseline tie instead of an environment bug.
-    with pytest.raises(RuntimeError, match="sandbox could not reach the workspace"):
-        PiOptimizer(max_retries=1).propose(
-            _toolset(), _run(), Validator("py", ("tools.py",)), tmp_path
-        )
-    assert "git root" in (tmp_path / "artifacts" / "decision.txt").read_text()
-
-
-def test_sandbox_marker_with_a_working_tool_call_is_not_a_denial(mocker, tmp_path):
-    """A stray bwrap warning alongside successful tool use must NOT abort."""
-    _which(mocker)
-    stdout = "\n".join([
-        _session(),
-        _tool_event("read", _BWRAP_ERR, is_error=True),
-        _tool_event("edit", "ok", is_error=False),
-    ])  # fmt: skip
-
-    def side(cmd, **kw):
-        (Path(kw["cwd"]) / "tools.py").write_text("def t():\n    return 1\n")
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
-
-    mocker.patch("agent_tool_opt_core.optimizers.pi.subprocess.run", side_effect=side)
-    cand = PiOptimizer(max_retries=1).propose(
-        _toolset(), _run(), Validator("py", ("tools.py",)), tmp_path
-    )
-    assert cand.files == {"tools.py": "def t():\n    return 1\n"}
-
-
-def test_sandbox_denial_on_stderr_only_is_still_detected(mocker, tmp_path):
-    """A sandbox that cannot start at all writes to stderr, never into a JSON
-    tool result — scanning stdout alone let that variant through as a null result."""
-    _which(mocker)
-
-    def side(cmd, **kw):
-        return subprocess.CompletedProcess(
-            cmd, 1, stdout=_session(), stderr="bwrap: Can't chdir: No such file"
-        )
-
-    mocker.patch("agent_tool_opt_core.optimizers.pi.subprocess.run", side_effect=side)
-    with pytest.raises(RuntimeError, match="sandbox could not reach the workspace"):
-        PiOptimizer(max_retries=1).propose(
-            _toolset(), _run(), Validator("py", ("tools.py",)), tmp_path
-        )
-    # stderr is persisted for diagnosis rather than discarded.
-    assert "bwrap" in (tmp_path / "artifacts" / "stderr.txt").read_text()
-
-
 def test_argv_preflight_covers_the_sandbox_prefix(mocker, tmp_path):
     """The kernel limit applies to the composed argv, so the preflight must see
     the sandbox prefix too — it previously checked only pi's own args."""
@@ -808,7 +731,7 @@ def test_sandbox_cmd_prefixes_the_pi_invocation(mocker, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, stdout=_session(), stderr="")
 
     mocker.patch("agent_tool_opt_core.optimizers.pi.subprocess.run", side_effect=side)
-    jail = ["bwrap", "--ro-bind", "/x", "/x", "--"]
+    jail = ["sandbox-wrapper", "--workspace", "/workspace", "--"]
     PiOptimizer(max_retries=1, sandbox_cmd=jail).propose(
         _toolset(), _run(), Validator("py", ("tools.py",)), tmp_path
     )

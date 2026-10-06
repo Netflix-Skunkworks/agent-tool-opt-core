@@ -12,6 +12,10 @@ from agent_tool_opt_core.adapters.run_phases import run_five_phases
 from agent_tool_opt_core.adapters.tau2 import Tau2Agent, Tau2Benchmark, Tau2ToolTarget
 from agent_tool_opt_core.adapters.terminal import load_splits
 from agent_tool_opt_core.optimizers.catalog import build_optimizer
+from agent_tool_opt_core.optimizers.pi_sandbox import (
+    add_pi_sandbox_arguments,
+    pi_sandbox_kwargs,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--optimizer", choices=("pi", "llm"), default="pi")
     parser.add_argument("--optimizer-model")
     parser.add_argument("--pi-provider", help="Pi provider name, if needed")
+    add_pi_sandbox_arguments(parser)
     parser.add_argument("--methods", default="reward_shaping,generalization")
     parser.add_argument(
         "--scope", choices=("descriptions", "full"), default="descriptions"
@@ -40,6 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.baseline_only and not args.optimizer_model:
         parser.error("--optimizer-model is required unless --baseline-only is set")
+    try:
+        sandbox_kwargs = pi_sandbox_kwargs(
+            args.pi_sandbox,
+            tuple(args.pi_sandbox_env),
+            optimizer=args.optimizer,
+            enabled=not args.baseline_only,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     train, test = load_splits(args.split)
     benchmark = Tau2Benchmark(
@@ -53,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     target = Tau2ToolTarget(args.domain, descriptions_only=args.scope == "descriptions")
     optimizer = None
     if not args.baseline_only:
-        optimizer_kwargs = {"model": args.optimizer_model}
+        optimizer_kwargs = {"model": args.optimizer_model, **sandbox_kwargs}
         if args.optimizer == "pi" and args.pi_provider:
             optimizer_kwargs["provider"] = args.pi_provider
         optimizer = build_optimizer(

@@ -43,10 +43,13 @@ npm install -g @earendil-works/pi-coding-agent@0.84.1
 pi --version
 ```
 
-Pi can read absolute host paths and inherits the process environment. Use
-scoped credentials and run it in an isolated environment when training
-transcripts are untrusted. Pi is not needed for the synthetic smoke or the
-one-shot LLM optimizer.
+By default, Pi can read absolute host paths and inherits the process environment.
+On Linux, add `--pi-sandbox bubblewrap --pi-sandbox-env OPENAI_API_KEY` to a Pi
+run to restrict its filesystem access and forward only the selected provider
+variable. See [Pi sandbox setup and boundaries](docs/pi_sandbox.md) for
+prerequisites, other providers, and Metaflow usage. Use scoped credentials and
+an isolated worker for generated-code execution. Pi is not needed for the
+synthetic smoke or the one-shot LLM optimizer.
 
 The `metaflow` extra installs upstream Metaflow. The harness runs the TauBench
 five-phase loop: baseline train/test, train-only optimization, then candidate

@@ -1,13 +1,11 @@
 """Public API for tool optimization — the five-concept model.
 
-See docs/plans/2026-06-11-tool-optimization-architecture.md.
-
 Roles are ABCs (we own every implementer): ``Benchmark``, ``Agent``,
 ``ToolTarget``, ``Optimizer``. Everything else is a value (dataclass). The
-only capability an ``Optimizer`` ever receives is a ``Validator`` — never
-``apply``/``evaluate`` (so it cannot see, and therefore cannot hack, the
-reward) — and a ``Validator`` is plain data so it survives a remote
-distributed execution boundary.
+``Validator`` is plain data so it survives a remote distributed execution
+boundary. Blind optimizers receive validation only; search optimizers may
+also receive a ``TrainEvaluator`` restricted to training tasks. Neither
+interface exposes held-out test evaluation.
 
 Concepts:
   1. Benchmark   — tasks + running an agent on them + scoring

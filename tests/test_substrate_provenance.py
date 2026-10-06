@@ -1,17 +1,18 @@
 """Provenance guard: benchmark- and strategy-specific priors are OPT-IN, never
 baked into the shared optimizer substrate.
 
-This encodes a design invariant (docs/plans/2026-06-11-tool-optimization-
-architecture.md): a deliberate prior about the target task belongs in a NAMED,
-opt-in Method (``optimizers/catalog.py``) or arrives through the ToolTarget's
-runtime channels (``ToolSet.language_rules`` / ``ToolSet.context``) — it must not
-live in the shared substrate (``BASE_OBJECTIVE`` and each optimizer's hardcoded
-prompt). So the substrate an optimizer runs is the SAME whichever benchmark it is
-pointed at; only what the ToolTarget and the selected Methods inject may vary.
+This encodes a design invariant: a deliberate prior about the target task
+belongs in a NAMED, opt-in Method (``optimizers/catalog.py``) or arrives through
+the ToolTarget's runtime channels (``ToolSet.language_rules`` /
+``ToolSet.context``). It must not live in the shared substrate
+(``BASE_OBJECTIVE`` and each optimizer's hardcoded prompt). The shared substrate
+stays the same across benchmarks; only ToolTarget context and selected Methods
+may vary.
 
 This is NOT the anti-reward-hacking invariant. That one is structural and lives
-elsewhere: an optimizer only ever receives a ``Validator`` (never ``evaluate`` /
-the reward) and only the *train* split (the "train jail"). See
+elsewhere: blind optimizers receive a ``Validator`` and training transcripts;
+search optimizers may also receive a training-only ``TrainEvaluator``. Neither
+interface exposes held-out test evaluation. See
 ``test_driver_experiment.py::test_optimizer_only_receives_a_validator`` and
 ``::test_propose_rejects_test_split_run``, and
 ``test_train_evaluator.py::test_train_evaluator_scores_train_and_is_test_blind``.

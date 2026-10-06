@@ -46,6 +46,11 @@ from agent_tool_opt_core.optimizers._common import (
     OptimizerLLMFailure,
     transcript_workspace_files,
 )
+from agent_tool_opt_core.optimizers.pi_sandbox import (
+    bubblewrap_command,
+    bubblewrap_runtime,
+    validate_sandbox_options,
+)
 
 # Optional OpenTelemetry — the lib stays runnable without it (spans no-op).
 try:  # pragma: no cover - soft dep
@@ -148,39 +153,8 @@ def _reject_oversized_argv_element(cmd: list[str]) -> None:
         )
 
 
-# bwrap's complaints when it cannot enter the workspace directory. pi's read/edit
-# tools run in a git-root-oriented agent-beach/bwrap sandbox, so a scratch
-# workspace outside the repo is unreachable and every tool call fails with one of
-# these. We scan pi's output for them (see _sandbox_denied_the_workspace) because
-# the failure is otherwise silent: pi edits nothing, the change gate reports
-# "accepted" with an empty Candidate, and downstream scores an environment bug as
-# a tie with the baseline.
-_SANDBOX_BROKEN_MARKERS = ("bwrap: Can't chdir", "bwrap: No such file or directory")
-
-
-def _sandbox_denied_the_workspace(stdout: str, stderr: str = "") -> bool:
-    """True iff pi's tool calls could not reach the workspace at all.
-
-    Distinguished from "pi chose not to edit" by requiring a sandbox chdir error
-    AND no successful tool execution. The marker is looked for in stderr too: pi
-    surfaces bwrap's complaint inside the JSON tool result when a *tool call*
-    fails, but a sandbox that cannot start at all writes only to stderr, and that
-    variant must not slip through as a null result.
-    """
-    if not any(m in stdout or m in stderr for m in _SANDBOX_BROKEN_MARKERS):
-        return False
-    for line in stdout.splitlines():
-        try:
-            ev = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if ev.get("type") == "tool_execution_end" and not ev.get("isError"):
-            return False  # something worked -> not a blanket sandbox denial
-    return True
-
-
-# Third shape of the same hazard: pi is on PATH (so __init__'s shutil.which
-# passes) but the session never starts — a half-installed npm tree leaves the
+# Pi can be on PATH (so __init__'s shutil.which passes) while its session never
+# starts — a half-installed npm tree leaves the
 # wrapper in place while node dies on a missing module. execve *succeeds*, so no
 # OSError becomes a launch_error; pi exits non-zero having written only to
 # stderr; the workspace is untouched -> gate_ok=True -> an empty Candidate
@@ -388,7 +362,14 @@ class PiOptimizer(Optimizer):
         require_validation: bool = True,
         sandbox_cmd: list[str] | None = None,
         env: dict[str, str] | None = None,
+        sandbox: str = "none",
+        sandbox_env: tuple[str, ...] = (),
     ) -> None:
+        validate_sandbox_options(sandbox, sandbox_env)
+        if sandbox != "none" and sandbox_cmd:
+            raise ValueError("choose built-in Pi sandboxing or sandbox_cmd, not both")
+        if sandbox == "bubblewrap":
+            bubblewrap_runtime(binary, env if env is not None else os.environ)
         if shutil.which(binary) is None:
             raise RuntimeError(f"PiOptimizer: '{binary}' not found on PATH.")
         self.model = model
@@ -414,12 +395,14 @@ class PiOptimizer(Optimizer):
         # (and the driver's train/test gate keeps test data out of `run`). But
         # pi's `read` may still reach absolute paths *outside* the scratch, and
         # it inherits the host env. For a hard boundary pass `sandbox_cmd` (a jail
-        # prefix, e.g. bubblewrap read-binding only the scratch) and a curated
+        # prefix exposing only the scratch workspace) and a curated
         # `env`. Verify confinement empirically: run pi in a scratch, ask it to
         # read an absolute path outside it; if that succeeds, a sandbox_cmd is
         # required to truly hide the host filesystem from the optimizer.
         self.sandbox_cmd = sandbox_cmd
         self.env = env
+        self.sandbox = sandbox
+        self.sandbox_env = tuple(sandbox_env)
 
     def propose(
         self,
@@ -502,14 +485,18 @@ class PiOptimizer(Optimizer):
                 cmd = [
                     self.binary, "-p", *prompt_args, "--system-prompt", system,
                     "--mode", "json", "--tools", "read,edit", "--model", self.model,
-                    "--session-dir", str(session_dir),
+                    "--session-dir", "/sessions" if self.sandbox == "bubblewrap" else str(session_dir),
                     "--no-context-files", "--no-skills", "--no-prompt-templates",
                 ]  # fmt: skip
+                if self.sandbox == "bubblewrap":
+                    cmd += ["--no-extensions"]
                 if session_id:
                     cmd += ["--session", session_id]
                 if self.provider:
                     cmd += ["--provider", self.provider]
-                stdout, stderr, launch_error, events = self._run(cmd, ws, cost_events)
+                stdout, stderr, launch_error, events = self._run(
+                    cmd, ws, cost_events, editable=tools.allowlist
+                )
                 combined_stdout += events + "\n"
                 combined_stderr += stderr
                 if launch_error:
@@ -542,39 +529,10 @@ class PiOptimizer(Optimizer):
                     )
                     self._trace(sp, combined_stdout, accepted=False, attempts=attempt)
                     raise RuntimeError(f"PiOptimizer: {decision}")
-                if _sandbox_denied_the_workspace(stdout, stderr):
-                    # Every tool call failed to reach the workspace (scratch
-                    # outside the sandbox's git root). Same silent-tie hazard as a
-                    # launch failure, so treat it the same way: persist and crash.
-                    attempts.append({
-                        "attempt": attempt,
-                        "sandbox_error": "pi's sandbox could not reach the workspace",
-                        "change_gate_ok": None,
-                        "validate_ok": None,
-                        "validation_required": self.require_validation,
-                        "n_changed_files": 0,
-                    })  # fmt: skip
-                    decision = (
-                        f"pi's sandbox could not reach the workspace on attempt "
-                        f"{attempt} ({ws}); every read/edit failed. Run with the "
-                        f"scratch inside the repo's git root."
-                    )
-                    logger.error(f"PiOptimizer: {decision}")
-                    self._persist(
-                        scratch,
-                        combined_stdout,
-                        attempts,
-                        tools.files,
-                        candidate,
-                        decision,
-                        combined_stderr,
-                    )
-                    self._trace(sp, combined_stdout, accepted=False, attempts=attempt)
-                    raise RuntimeError(f"PiOptimizer: {decision}")
                 if _session_never_started(stdout):
                     # No session event: execve succeeded (so the binary resolved)
                     # but pi produced no session. Same silent-tie hazard as a
-                    # launch failure or a sandbox denial, so handled the same way.
+                    # launch failure, so handled the same way.
                     attempts.append({
                         "attempt": attempt,
                         "no_session_error": "pi emitted no session event",
@@ -721,7 +679,12 @@ class PiOptimizer(Optimizer):
             dst.write_text(content)
 
     def _run(
-        self, cmd: list[str], ws: Path, cost_events: list[str]
+        self,
+        cmd: list[str],
+        ws: Path,
+        cost_events: list[str],
+        *,
+        editable: tuple[str, ...] = (),
     ) -> tuple[str, str, str | None, str]:
         """Run pi, retrying the whole session on transient upstream overload.
 
@@ -734,7 +697,7 @@ class PiOptimizer(Optimizer):
         could not be started at all (OSError out of execve, or our argv preflight):
         the session never began, so retrying the *prompt* is pointless and the
         caller must not mistake the unchanged workspace for an accepted no-op
-        candidate. ``stderr`` is returned rather than dropped: bwrap/node failures
+        candidate. ``stderr`` is returned rather than dropped: process failures
         that never make it into a JSON tool result land there, and this optimizer's
         whole premise is that an environment fault must not read as a null result.
         """
@@ -742,7 +705,7 @@ class PiOptimizer(Optimizer):
         outputs = []
         for attempt in range(1, 7):
             stdout, stderr, returncode, timed_out, launch_error = self._run_once(
-                cmd, ws
+                cmd, ws, editable=editable
             )
             outputs.append(stdout)
             cost_events.append(stdout)
@@ -787,6 +750,11 @@ class PiOptimizer(Optimizer):
                     logger.warning(f"PiOptimizer: pi stderr tail: {stderr[-2000:]}")
             transient = _is_transient_upstream_failure(stdout)
             if not transient:
+                if self.sandbox == "bubblewrap" and returncode != 0:
+                    raise OptimizerInfrastructureFailure(
+                        f"Pi sandboxed process failed (exit {returncode}); "
+                        "check the Linux runtime and user-namespace permissions"
+                    )
                 return stdout, stderr, None, "\n".join(outputs)
             if attempt == 6:
                 raise OptimizerInfrastructureFailure(
@@ -802,9 +770,14 @@ class PiOptimizer(Optimizer):
         return stdout, stderr, None, "\n".join(outputs)
 
     def _run_once(
-        self, cmd: list[str], ws: Path
+        self, cmd: list[str], ws: Path, *, editable: tuple[str, ...] = ()
     ) -> tuple[str, str, int, bool, str | None]:
         argv = (self.sandbox_cmd or []) + cmd
+        environment = self.env if self.env is not None else os.environ.copy()
+        if self.sandbox == "bubblewrap":
+            argv, environment = bubblewrap_command(
+                cmd, ws, editable, environment, self.sandbox_env
+            )
         try:
             # Preflight the argv that is actually exec'd, sandbox prefix included —
             # the kernel limit applies per element of the composed list.
@@ -812,7 +785,7 @@ class PiOptimizer(Optimizer):
             proc = subprocess.run(
                 argv,
                 cwd=str(ws),
-                env=self.env if self.env is not None else os.environ.copy(),
+                env=environment,
                 timeout=self.timeout,
                 # pi merges piped stdin into the initial prompt whenever stdin is
                 # not a TTY; pin it closed so an inherited fd can neither pollute

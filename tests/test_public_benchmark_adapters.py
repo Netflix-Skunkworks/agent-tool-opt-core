@@ -382,7 +382,8 @@ def test_harbor_failure_reports_type_without_stderr_secrets(monkeypatch, tmp_pat
     monkeypatch.setattr(
         "agent_tool_opt_core.adapters.terminal.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(
-            returncode=1, stderr="AuthenticationError: api_key=secret123"
+            returncode=1,
+            stderr="AuthenticationError: api_key=TEST_ONLY_NOT_A_REAL_API_KEY",
         ),
     )
     with pytest.raises(RuntimeError) as error:
@@ -390,7 +391,7 @@ def test_harbor_failure_reports_type_without_stderr_secrets(monkeypatch, tmp_pat
             OpenCodeAgent("provider/model"), ["a"], OpenCodeToolTarget(source).extract()
         )
     assert "AuthenticationError" in str(error.value)
-    assert "secret123" not in str(error.value)
+    assert "TEST_ONLY_NOT_A_REAL_API_KEY" not in str(error.value)
 
 
 def test_harbor_missing_reward_is_not_scored_as_zero(tmp_path):
@@ -433,7 +434,7 @@ def test_harbor_trial_error_reports_only_safe_type(tmp_path):
                 "trial_name": "trial-1",
                 "exception_info": {
                     "exception_type": "AgentAuthenticationError",
-                    "exception_message": "api_key=secret123",
+                    "exception_message": "api_key=TEST_ONLY_NOT_A_REAL_API_KEY",
                 },
             }
         )
@@ -441,7 +442,7 @@ def test_harbor_trial_error_reports_only_safe_type(tmp_path):
     with pytest.raises(RuntimeError) as error:
         _harbor_results(job, ["task-1"], "terminal-bench@2.0", "model")
     assert "AgentAuthenticationError" in str(error.value)
-    assert "secret123" not in str(error.value)
+    assert "TEST_ONLY_NOT_A_REAL_API_KEY" not in str(error.value)
 
 
 def test_harbor_restores_instruction_from_trial_result(tmp_path):

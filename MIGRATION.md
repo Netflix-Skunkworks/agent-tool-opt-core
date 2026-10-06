@@ -1,23 +1,23 @@
-# Public migration status
+# Implementation status
 
-This repository is a clean-room migration from a private implementation. Internal Git history and deployment configuration are intentionally excluded.
+This document summarizes the functionality available in `agent-tool-opt-core`.
 
-## Completed
+## Implemented
 
-- initialized a clean Git repository;
-- migrated the provider-neutral core package and tests;
-- replaced in-process internal SDK calls with an injectable LiteLLM client;
-- delegated provider routing and authentication to LiteLLM;
-- retained normalized usage, cost, and provider provenance;
-- declared upstream Metaflow as an optional dependency; and
-- added public contribution, security, and CI baselines.
+- Provider-neutral core package and tests, with an injectable LiteLLM client
+  for provider routing and authentication.
+- Normalized usage, cost, and provider provenance.
+- TauBench Verified, TerminalBench 2, and TBLite adapters using separately
+  installed upstream code and datasets.
+- Command-line benchmark runners and an optional upstream Metaflow harness,
+  including synthetic smoke execution and datastore artifact support.
+- Optional upstream Bubblewrap confinement for the Pi subprocess, exposed by
+  the CLI runners, Python API, and Metaflow harness.
+- Apache-2.0 [LICENSE](LICENSE) and copyright [NOTICE](NOTICE).
+- [Contribution guidelines](CONTRIBUTING.md), a
+  [vulnerability-reporting policy](SECURITY.md), and CI for formatting, lint,
+  unit tests, and synthetic Metaflow smoke runs.
 
-## Pending
-
-- obtain OSPO/legal approval and add the chosen `LICENSE`;
-- migrate and sanitize benchmark adapters individually;
-- migrate the generic Metaflow harness using upstream Metaflow only;
-- remove or rewrite private deployment examples and generated optimizer-I/O captures;
-- add public maintainer, support, governance, and release policies;
-- run secret, dependency-license, and source-reference audits; and
-- validate wheel installation in a clean public-only environment.
+Remote execution requires backend-specific validation as described in
+[the Metaflow guide](docs/metaflow_remote.md). Local CI smoke checks do not
+establish that every remote backend has been tested.

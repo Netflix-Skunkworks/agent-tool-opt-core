@@ -29,7 +29,6 @@ benchmark task IDs are allowed; document their upstream source and keep the
 benchmark data in its separately installed checkout.
 
 Review generated logs, experiment outputs, and source bundles before sharing
-them. Follow [SECURITY.md](SECURITY.md) for handling artifacts and reporting
-suspected vulnerabilities.
+them.
 
 By contributing, you agree that your contribution may be distributed under the repository's Apache-2.0 license.

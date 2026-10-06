@@ -109,7 +109,7 @@ and environment restrictions.
   boundary from Pi's sandbox.
 
 Workspace validation still runs after Pi exits. Review saved artifacts before
-sharing them, as described in [SECURITY.md](../SECURITY.md).
+sharing them.
 
 ## Integration smoke
 
